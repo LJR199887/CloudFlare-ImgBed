@@ -8,30 +8,61 @@
     :root {
       color-scheme: light dark;
       font-family: Arial, "Microsoft YaHei", sans-serif;
-      background: #f5f7fb;
-      color: #1f2937;
+      background: #f4f6fa;
+      color: #172033;
     }
     body {
       margin: 0;
-      padding: 32px;
+      padding: 28px;
     }
     main {
-      max-width: 980px;
+      max-width: 1040px;
       margin: 0 auto;
       background: #fff;
       border: 1px solid #e5e7eb;
       border-radius: 8px;
-      padding: 28px;
-      box-shadow: 0 10px 30px rgba(15, 23, 42, .06);
+      padding: 26px;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .06);
     }
     h1 {
-      margin: 0 0 8px;
+      margin: 0;
       font-size: 24px;
     }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+    .hint,
+    .small {
+      color: #637083;
+      line-height: 1.55;
+    }
     .hint {
-      margin: 0 0 24px;
-      color: #6b7280;
-      line-height: 1.6;
+      margin: 8px 0 0;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .metric {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      background: #f9fafb;
+    }
+    .metric span {
+      display: block;
+      color: #637083;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .metric strong {
+      font-size: 24px;
     }
     .grid {
       display: grid;
@@ -40,7 +71,7 @@
     }
     label {
       display: block;
-      font-weight: 600;
+      font-weight: 700;
       margin-bottom: 8px;
     }
     input[type="number"],
@@ -48,7 +79,7 @@
     textarea {
       width: 100%;
       box-sizing: border-box;
-      border: 1px solid #d1d5db;
+      border: 1px solid #cfd6e1;
       border-radius: 6px;
       padding: 10px 12px;
       font: inherit;
@@ -56,11 +87,12 @@
       color: inherit;
     }
     textarea {
-      min-height: 76px;
+      min-height: 78px;
       resize: vertical;
     }
     .switches {
       display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
       margin-bottom: 18px;
     }
@@ -68,7 +100,12 @@
       display: flex;
       gap: 10px;
       align-items: center;
-      font-weight: 600;
+      min-height: 42px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #f9fafb;
+      font-weight: 700;
     }
     .check input {
       width: 18px;
@@ -80,7 +117,8 @@
       gap: 12px;
       margin-top: 24px;
     }
-    button {
+    button,
+    a.button {
       border: 0;
       border-radius: 6px;
       padding: 10px 16px;
@@ -89,38 +127,68 @@
       cursor: pointer;
       background: #2563eb;
       color: white;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
-    button.secondary {
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+    .secondary {
       background: #e5e7eb;
       color: #111827;
     }
-    button.danger {
+    .danger {
       background: #dc2626;
     }
-    pre {
-      margin-top: 24px;
+    .status {
+      margin-top: 22px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
       padding: 16px;
+      background: #f9fafb;
+    }
+    .status h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+    .rows {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px dashed #d5dae3;
+      padding-bottom: 8px;
+    }
+    .message {
+      margin-top: 14px;
+      padding: 12px;
       border-radius: 6px;
-      background: #0f172a;
-      color: #d1fae5;
-      overflow: auto;
-      min-height: 140px;
-      white-space: pre-wrap;
+      background: #eef2ff;
+      color: #1e3a8a;
+      line-height: 1.55;
+      min-height: 22px;
     }
-    .small {
-      margin-top: 6px;
-      color: #6b7280;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    @media (max-width: 720px) {
+    @media (max-width: 760px) {
       body {
-        padding: 14px;
+        padding: 12px;
       }
       main {
         padding: 18px;
       }
-      .grid {
+      .top {
+        display: block;
+      }
+      .summary,
+      .grid,
+      .switches,
+      .rows {
         grid-template-columns: 1fr;
       }
     }
@@ -133,6 +201,12 @@
         background: #1f2937;
         border-color: #374151;
       }
+      .metric,
+      .check,
+      .status {
+        background: #111827;
+        border-color: #374151;
+      }
       input[type="number"],
       input[type="text"],
       textarea {
@@ -140,24 +214,41 @@
         border-color: #4b5563;
       }
       .hint,
-      .small {
-        color: #9ca3af;
+      .small,
+      .metric span {
+        color: #a7b0bf;
       }
-      button.secondary {
+      .secondary {
         background: #374151;
         color: #e5e7eb;
+      }
+      .message {
+        background: #172554;
+        color: #dbeafe;
       }
     }
   </style>
 </head>
 <body>
   <main>
-    <h1>自动清理设置</h1>
-    <p class="hint">需要先登录管理端。本页配置只作用于 Docker 部署，默认试运行不会删除文件。</p>
+    <div class="top">
+      <div>
+        <h1>自动清理设置</h1>
+        <p class="hint">先登录管理端再打开本页。建议先开启试运行，确认数量后再真实删除。</p>
+      </div>
+      <a class="button secondary" href="/adminLogin">管理端登录</a>
+    </div>
+
+    <section class="summary">
+      <div class="metric"><span>上次扫描</span><strong id="metricScanned">-</strong></div>
+      <div class="metric"><span>匹配文件</span><strong id="metricMatched">-</strong></div>
+      <div class="metric"><span>成功删除</span><strong id="metricDeleted">-</strong></div>
+      <div class="metric"><span>失败数量</span><strong id="metricFailed">-</strong></div>
+    </section>
 
     <div class="switches">
       <label class="check"><input id="enabled" type="checkbox"> 启用自动清理</label>
-      <label class="check"><input id="dryRun" type="checkbox"> 试运行模式（只统计，不删除）</label>
+      <label class="check"><input id="dryRun" type="checkbox"> 试运行模式</label>
       <label class="check"><input id="keepWhiteList" type="checkbox"> 跳过白名单文件</label>
     </div>
 
@@ -168,14 +259,14 @@
         <div class="small">删除早于这个天数的文件，例如 180 表示保留最近 180 天。</div>
       </div>
       <div>
-        <label for="batchSize">每次最多处理数量</label>
+        <label for="batchSize">每次最多删除</label>
         <input id="batchSize" type="number" min="1" max="5000">
-        <div class="small">建议 100 到 1000，文件很多时分批慢慢清。</div>
+        <div class="small">建议 500 到 2000。数量越大，单次执行压力越高。</div>
       </div>
       <div>
         <label for="intervalHours">执行间隔（小时）</label>
         <input id="intervalHours" type="number" min="1" max="720">
-        <div class="small">例如 24 表示每天自动检查一次。</div>
+        <div class="small">例如 12 表示每 12 小时自动检查一次。</div>
       </div>
       <div>
         <label for="excludeTags">排除标签</label>
@@ -195,36 +286,89 @@
       <button id="runBtn" class="danger">立即执行一次</button>
     </div>
 
-    <pre id="output">加载中...</pre>
+    <section class="status">
+      <h2>运行状态</h2>
+      <div class="rows">
+        <div class="row"><span>当前状态</span><strong id="running">-</strong></div>
+        <div class="row"><span>模式</span><strong id="mode">-</strong></div>
+        <div class="row"><span>上次开始</span><strong id="lastStartedAt">-</strong></div>
+        <div class="row"><span>上次结束</span><strong id="lastFinishedAt">-</strong></div>
+        <div class="row"><span>下次执行</span><strong id="nextRunAt">-</strong></div>
+        <div class="row"><span>保留天数</span><strong id="retentionInfo">-</strong></div>
+      </div>
+      <div id="message" class="message">加载中...</div>
+    </section>
   </main>
 
   <script>
     const api = '/api/manage/cleanup';
     const fields = ['enabled', 'dryRun', 'keepWhiteList', 'retentionDays', 'batchSize', 'intervalHours', 'excludeTags', 'excludeDirs'];
-    const output = document.getElementById('output');
+    const buttons = ['saveBtn', 'reloadBtn', 'runBtn'].map(id => document.getElementById(id));
 
-    function show(data) {
-      output.textContent = JSON.stringify(data, null, 2);
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function setBusy(isBusy) {
+      buttons.forEach(button => button.disabled = isBusy);
+    }
+
+    function formatTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return date.toLocaleString();
+    }
+
+    function number(value) {
+      return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '-';
     }
 
     function readForm() {
       return {
-        enabled: document.getElementById('enabled').checked,
-        dryRun: document.getElementById('dryRun').checked,
-        keepWhiteList: document.getElementById('keepWhiteList').checked,
-        retentionDays: Number(document.getElementById('retentionDays').value),
-        batchSize: Number(document.getElementById('batchSize').value),
-        intervalHours: Number(document.getElementById('intervalHours').value),
-        excludeTags: document.getElementById('excludeTags').value,
-        excludeDirs: document.getElementById('excludeDirs').value,
+        enabled: $('enabled').checked,
+        dryRun: $('dryRun').checked,
+        keepWhiteList: $('keepWhiteList').checked,
+        retentionDays: Number($('retentionDays').value),
+        batchSize: Number($('batchSize').value),
+        intervalHours: Number($('intervalHours').value),
+        excludeTags: $('excludeTags').value,
+        excludeDirs: $('excludeDirs').value,
       };
     }
 
     function fillForm(config) {
       for (const key of fields) {
-        const el = document.getElementById(key);
+        const el = $(key);
         if (el.type === 'checkbox') el.checked = Boolean(config[key]);
         else el.value = config[key] ?? '';
+      }
+    }
+
+    function render(data, actionText) {
+      const config = data.config || {};
+      const status = data.status || {};
+      const result = data.result || status.lastResult || {};
+
+      $('metricScanned').textContent = number(result.scanned);
+      $('metricMatched').textContent = number(result.matched);
+      $('metricDeleted').textContent = number(result.deleted);
+      $('metricFailed').textContent = number(result.failed);
+      $('running').textContent = status.running ? '运行中' : '空闲';
+      $('mode').textContent = config.dryRun ? '试运行，不删除' : '真实删除';
+      $('lastStartedAt').textContent = formatTime(status.lastStartedAt);
+      $('lastFinishedAt').textContent = formatTime(status.lastFinishedAt);
+      $('nextRunAt').textContent = formatTime(status.nextRunAt);
+      $('retentionInfo').textContent = `${config.retentionDays || '-'} 天`;
+
+      if (result.success === false) {
+        $('message').textContent = `执行失败：${result.error || result.reason || '未知错误'}`;
+      } else if (actionText) {
+        $('message').textContent = actionText;
+      } else if (result.cutoffISO) {
+        $('message').textContent = `上次清理截止时间：${formatTime(result.cutoffISO)}。扫描 ${number(result.scanned)} 个，匹配 ${number(result.matched)} 个，删除 ${number(result.deleted)} 个，失败 ${number(result.failed)} 个。`;
+      } else {
+        $('message').textContent = '还没有执行记录。保存设置后可以先立即执行一次试运行。';
       }
     }
 
@@ -240,26 +384,32 @@
       return response.json();
     }
 
-    async function load() {
+    async function load(actionText = '') {
+      setBusy(true);
       try {
         const data = await request(api);
         fillForm(data.config);
-        show(data);
+        render(data, actionText);
       } catch (error) {
-        show({ error: error.message, tip: '请确认已经登录管理端。' });
+        $('message').textContent = `加载失败：${error.message}。请确认已经登录管理端。`;
+      } finally {
+        setBusy(false);
       }
     }
 
     async function save() {
+      setBusy(true);
       try {
         const data = await request(api, {
           method: 'POST',
           body: JSON.stringify(readForm()),
         });
         fillForm(data.config);
-        show(data);
+        render(data, '设置已保存。');
       } catch (error) {
-        show({ error: error.message });
+        $('message').textContent = `保存失败：${error.message}`;
+      } finally {
+        setBusy(false);
       }
     }
 
@@ -269,18 +419,24 @@
         ? '当前是试运行，只会统计不会删除。是否继续？'
         : '当前会真实删除匹配文件。确认已经备份并继续？';
       if (!confirm(warning)) return;
+
+      setBusy(true);
+      $('message').textContent = '正在执行，请稍候...';
       try {
         const data = await request(api, { method: 'PUT' });
         fillForm(data.config);
-        show(data);
+        const result = data.result || {};
+        render(data, `执行完成：扫描 ${number(result.scanned)} 个，匹配 ${number(result.matched)} 个，删除 ${number(result.deleted)} 个，失败 ${number(result.failed)} 个。`);
       } catch (error) {
-        show({ error: error.message });
+        $('message').textContent = `执行失败：${error.message}`;
+      } finally {
+        setBusy(false);
       }
     }
 
-    document.getElementById('saveBtn').addEventListener('click', save);
-    document.getElementById('reloadBtn').addEventListener('click', load);
-    document.getElementById('runBtn').addEventListener('click', runNow);
+    $('saveBtn').addEventListener('click', save);
+    $('reloadBtn').addEventListener('click', () => load('已重新加载最新状态。'));
+    $('runBtn').addEventListener('click', runNow);
     load();
   </script>
 </body>

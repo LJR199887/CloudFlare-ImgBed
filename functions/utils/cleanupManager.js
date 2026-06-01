@@ -65,19 +65,37 @@ export async function saveCleanupConfig(env, config) {
 export async function getCleanupStatus(env) {
     const db = getDatabase(env);
     const statusStr = await db.get(STATUS_KEY);
-    return statusStr ? JSON.parse(statusStr) : {
+    const status = statusStr ? JSON.parse(statusStr) : {
         running: false,
         lastStartedAt: null,
         lastFinishedAt: null,
         lastResult: null,
         nextRunAt: null,
     };
+    return sanitizeStatus(status);
 }
 
 export async function saveCleanupStatus(env, status) {
     const db = getDatabase(env);
-    await db.put(STATUS_KEY, JSON.stringify(status));
-    return status;
+    const sanitized = sanitizeStatus(status);
+    await db.put(STATUS_KEY, JSON.stringify(sanitized));
+    return sanitized;
+}
+
+function summarizeResult(result) {
+    if (!result || typeof result !== 'object') return result;
+    const { deletedFiles, failedFiles, ...summary } = result;
+    summary.deleted = Number(summary.deleted ?? deletedFiles?.length ?? 0);
+    summary.failed = Number(summary.failed ?? failedFiles?.length ?? 0);
+    return summary;
+}
+
+function sanitizeStatus(status) {
+    if (!status || typeof status !== 'object') return status;
+    return {
+        ...status,
+        lastResult: summarizeResult(status.lastResult),
+    };
 }
 
 function shouldSkipRecord(row, config) {
@@ -158,9 +176,8 @@ export async function runCleanup(context, options = {}) {
         matched: 0,
         deleted: 0,
         failed: 0,
-        failedFiles: [],
-        deletedFiles: [],
     };
+    const deletedFileIds = [];
 
     try {
         const expired = await listExpiredFiles(env, config, cutoff);
@@ -174,15 +191,14 @@ export async function runCleanup(context, options = {}) {
                 const ok = await deleteFile(env, fileId, cdnUrl, url);
                 if (ok) {
                     result.deleted++;
-                    result.deletedFiles.push(fileId);
+                    deletedFileIds.push(fileId);
                 } else {
                     result.failed++;
-                    result.failedFiles.push(fileId);
                 }
             }
 
-            if (result.deletedFiles.length > 0) {
-                await batchRemoveFilesFromIndex(context, result.deletedFiles);
+            if (deletedFileIds.length > 0) {
+                await batchRemoveFilesFromIndex(context, deletedFileIds);
             }
         }
 
