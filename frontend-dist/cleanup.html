@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>自动清理设置</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    body {
+      margin: 0;
+      padding: 32px;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 28px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, .06);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+    .hint {
+      margin: 0 0 24px;
+      color: #6b7280;
+      line-height: 1.6;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    input[type="number"],
+    input[type="text"],
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+      color: inherit;
+    }
+    textarea {
+      min-height: 76px;
+      resize: vertical;
+    }
+    .switches {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .check {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      font-weight: 600;
+    }
+    .check input {
+      width: 18px;
+      height: 18px;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+    }
+    button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    button.danger {
+      background: #dc2626;
+    }
+    pre {
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 6px;
+      background: #0f172a;
+      color: #d1fae5;
+      overflow: auto;
+      min-height: 140px;
+      white-space: pre-wrap;
+    }
+    .small {
+      margin-top: 6px;
+      color: #6b7280;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    @media (max-width: 720px) {
+      body {
+        padding: 14px;
+      }
+      main {
+        padding: 18px;
+      }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        background: #111827;
+        color: #e5e7eb;
+      }
+      main {
+        background: #1f2937;
+        border-color: #374151;
+      }
+      input[type="number"],
+      input[type="text"],
+      textarea {
+        background: #111827;
+        border-color: #4b5563;
+      }
+      .hint,
+      .small {
+        color: #9ca3af;
+      }
+      button.secondary {
+        background: #374151;
+        color: #e5e7eb;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>自动清理设置</h1>
+    <p class="hint">需要先登录管理端。本页配置只作用于 Docker 部署，默认试运行不会删除文件。</p>
+
+    <div class="switches">
+      <label class="check"><input id="enabled" type="checkbox"> 启用自动清理</label>
+      <label class="check"><input id="dryRun" type="checkbox"> 试运行模式（只统计，不删除）</label>
+      <label class="check"><input id="keepWhiteList" type="checkbox"> 跳过白名单文件</label>
+    </div>
+
+    <section class="grid">
+      <div>
+        <label for="retentionDays">保留天数</label>
+        <input id="retentionDays" type="number" min="1" max="3650">
+        <div class="small">删除早于这个天数的文件，例如 180 表示保留最近 180 天。</div>
+      </div>
+      <div>
+        <label for="batchSize">每次最多处理数量</label>
+        <input id="batchSize" type="number" min="1" max="5000">
+        <div class="small">建议 100 到 1000，文件很多时分批慢慢清。</div>
+      </div>
+      <div>
+        <label for="intervalHours">执行间隔（小时）</label>
+        <input id="intervalHours" type="number" min="1" max="720">
+        <div class="small">例如 24 表示每天自动检查一次。</div>
+      </div>
+      <div>
+        <label for="excludeTags">排除标签</label>
+        <input id="excludeTags" type="text" placeholder="keep,永久保留">
+        <div class="small">多个用英文逗号分隔。</div>
+      </div>
+      <div style="grid-column: 1 / -1;">
+        <label for="excludeDirs">排除目录</label>
+        <textarea id="excludeDirs" placeholder="avatar/,important/"></textarea>
+        <div class="small">多个用英文逗号分隔。目录内所有子文件也会跳过。</div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="saveBtn">保存设置</button>
+      <button id="reloadBtn" class="secondary">重新加载</button>
+      <button id="runBtn" class="danger">立即执行一次</button>
+    </div>
+
+    <pre id="output">加载中...</pre>
+  </main>
+
+  <script>
+    const api = '/api/manage/cleanup';
+    const fields = ['enabled', 'dryRun', 'keepWhiteList', 'retentionDays', 'batchSize', 'intervalHours', 'excludeTags', 'excludeDirs'];
+    const output = document.getElementById('output');
+
+    function show(data) {
+      output.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function readForm() {
+      return {
+        enabled: document.getElementById('enabled').checked,
+        dryRun: document.getElementById('dryRun').checked,
+        keepWhiteList: document.getElementById('keepWhiteList').checked,
+        retentionDays: Number(document.getElementById('retentionDays').value),
+        batchSize: Number(document.getElementById('batchSize').value),
+        intervalHours: Number(document.getElementById('intervalHours').value),
+        excludeTags: document.getElementById('excludeTags').value,
+        excludeDirs: document.getElementById('excludeDirs').value,
+      };
+    }
+
+    function fillForm(config) {
+      for (const key of fields) {
+        const el = document.getElementById(key);
+        if (el.type === 'checkbox') el.checked = Boolean(config[key]);
+        else el.value = config[key] ?? '';
+      }
+    }
+
+    async function request(url, options) {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      return response.json();
+    }
+
+    async function load() {
+      try {
+        const data = await request(api);
+        fillForm(data.config);
+        show(data);
+      } catch (error) {
+        show({ error: error.message, tip: '请确认已经登录管理端。' });
+      }
+    }
+
+    async function save() {
+      try {
+        const data = await request(api, {
+          method: 'POST',
+          body: JSON.stringify(readForm()),
+        });
+        fillForm(data.config);
+        show(data);
+      } catch (error) {
+        show({ error: error.message });
+      }
+    }
+
+    async function runNow() {
+      const form = readForm();
+      const warning = form.dryRun
+        ? '当前是试运行，只会统计不会删除。是否继续？'
+        : '当前会真实删除匹配文件。确认已经备份并继续？';
+      if (!confirm(warning)) return;
+      try {
+        const data = await request(api, { method: 'PUT' });
+        fillForm(data.config);
+        show(data);
+      } catch (error) {
+        show({ error: error.message });
+      }
+    }
+
+    document.getElementById('saveBtn').addEventListener('click', save);
+    document.getElementById('reloadBtn').addEventListener('click', load);
+    document.getElementById('runBtn').addEventListener('click', runNow);
+    load();
+  </script>
+</body>
+</html>
