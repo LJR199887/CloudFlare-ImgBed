@@ -1,9 +1,10 @@
 import { deleteFile } from '../api/manage/delete/[[path]].js';
-import { batchRemoveFilesFromIndex } from './indexManager.js';
+import { batchRemoveFilesFromIndex, mergeOperationsToIndex } from './indexManager.js';
 import { getDatabase } from './databaseAdapter.js';
 
 const CONFIG_KEY = 'manage@sysConfig@cleanup';
 const STATUS_KEY = 'manage@sysConfig@cleanupStatus';
+const MAX_LOG_ENTRIES = 30;
 const DEFAULT_CONFIG = {
     enabled: false,
     dryRun: true,
@@ -95,7 +96,18 @@ function sanitizeStatus(status) {
     return {
         ...status,
         lastResult: summarizeResult(status.lastResult),
+        logs: Array.isArray(status.logs) ? status.logs.map(summarizeResult).slice(0, MAX_LOG_ENTRIES) : [],
     };
+}
+
+function appendCleanupLog(status, result, startedAt, finishedAt) {
+    const logs = Array.isArray(status.logs) ? status.logs : [];
+    const entry = summarizeResult({
+        ...result,
+        startedAt,
+        finishedAt,
+    });
+    return [entry, ...logs].slice(0, MAX_LOG_ENTRIES);
 }
 
 function shouldSkipRecord(row, config) {
@@ -199,6 +211,7 @@ export async function runCleanup(context, options = {}) {
 
             if (deletedFileIds.length > 0) {
                 await batchRemoveFilesFromIndex(context, deletedFileIds);
+                await mergeOperationsToIndex(context);
             }
         }
 
@@ -209,12 +222,15 @@ export async function runCleanup(context, options = {}) {
         return result;
     } finally {
         const finishedAt = Date.now();
+        const startedAtISO = new Date(now).toISOString();
+        const finishedAtISO = new Date(finishedAt).toISOString();
         await saveCleanupStatus(env, {
             running: false,
-            lastStartedAt: new Date(now).toISOString(),
-            lastFinishedAt: new Date(finishedAt).toISOString(),
+            lastStartedAt: startedAtISO,
+            lastFinishedAt: finishedAtISO,
             nextRunAt: new Date(finishedAt + config.intervalHours * 60 * 60 * 1000).toISOString(),
             lastResult: result,
+            logs: appendCleanupLog(status, result, startedAtISO, finishedAtISO),
         });
     }
 }
