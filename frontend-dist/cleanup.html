@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>自动清理设置</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      background: #f4f6fa;
+      color: #172033;
+    }
+    body {
+      margin: 0;
+      padding: 28px;
+      overflow-x: hidden;
+    }
+    body.embedded {
+      padding: 0;
+      background: transparent;
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 26px;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .06);
+      box-sizing: border-box;
+    }
+    body.embedded main {
+      width: min(100%, 1320px);
+      max-width: calc(100vw - 32px);
+      margin: 0 auto;
+      padding: 18px 20px 24px;
+      box-shadow: none;
+      border: 0;
+      overflow: hidden;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+    .hint,
+    .small {
+      color: #637083;
+      line-height: 1.55;
+    }
+    .hint {
+      margin: 8px 0 0;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .metric {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      background: #f9fafb;
+    }
+    .metric span {
+      display: block;
+      color: #637083;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .metric strong {
+      font-size: 24px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    input[type="number"],
+    input[type="text"],
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cfd6e1;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+      color: inherit;
+    }
+    textarea {
+      min-height: 78px;
+      resize: vertical;
+    }
+    .switches {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .check {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      min-height: 42px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #f9fafb;
+      font-weight: 700;
+      min-width: 0;
+      line-height: 1.35;
+    }
+    .check input {
+      width: 18px;
+      height: 18px;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    button,
+    a.button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+    .secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .danger {
+      background: #dc2626;
+    }
+    .status {
+      margin-top: 22px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      background: #f9fafb;
+    }
+    details {
+      margin-top: 18px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #f9fafb;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+      padding: 14px 16px;
+      user-select: none;
+    }
+    .log-list {
+      display: grid;
+      gap: 10px;
+      padding: 0 16px 16px;
+    }
+    .log-item {
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 12px;
+      background: #fff;
+    }
+    .log-title {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    .log-title span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .log-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      color: #334155;
+      font-size: 13px;
+    }
+    .log-grid span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .status h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+    .rows {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+      gap: 12px;
+      border-bottom: 1px dashed #d5dae3;
+      padding-bottom: 8px;
+      min-width: 0;
+    }
+    .row strong {
+      min-width: 0;
+      text-align: right;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .message {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #eef2ff;
+      color: #1e3a8a;
+      line-height: 1.55;
+      min-height: 22px;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 1180px) {
+      .rows,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 760px) {
+      body {
+        padding: 12px;
+      }
+      main {
+        padding: 18px;
+      }
+      body.embedded main {
+        max-width: 100vw;
+        padding: 12px;
+      }
+      .top {
+        display: block;
+      }
+      .summary,
+      .grid,
+      .switches,
+      .rows {
+        grid-template-columns: 1fr;
+      }
+      .log-title {
+        grid-template-columns: 1fr;
+      }
+      .row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+      .row strong {
+        text-align: left;
+      }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        background: #111827;
+        color: #e5e7eb;
+      }
+      main {
+        background: #1f2937;
+        border-color: #374151;
+      }
+      .metric,
+      .check,
+      .status,
+      details,
+      .log-item {
+        background: #111827;
+        border-color: #374151;
+      }
+      input[type="number"],
+      input[type="text"],
+      textarea {
+        background: #111827;
+        border-color: #4b5563;
+      }
+      .hint,
+      .small,
+      .metric span {
+        color: #a7b0bf;
+      }
+      .secondary {
+        background: #374151;
+        color: #e5e7eb;
+      }
+      .message {
+        background: #172554;
+        color: #dbeafe;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="top">
+      <div>
+        <h1>自动清理设置</h1>
+        <p class="hint">先登录管理端再打开本页。建议先开启试运行，确认数量后再真实删除。</p>
+      </div>
+      <a class="button secondary" href="/adminLogin">管理端登录</a>
+    </div>
+
+    <section class="summary">
+      <div class="metric"><span>上次扫描</span><strong id="metricScanned">-</strong></div>
+      <div class="metric"><span>匹配文件</span><strong id="metricMatched">-</strong></div>
+      <div class="metric"><span>成功删除</span><strong id="metricDeleted">-</strong></div>
+      <div class="metric"><span>失败数量</span><strong id="metricFailed">-</strong></div>
+    </section>
+
+    <div class="switches">
+      <label class="check"><input id="enabled" type="checkbox"> 启用自动清理</label>
+      <label class="check"><input id="dryRun" type="checkbox"> 试运行模式</label>
+      <label class="check"><input id="keepWhiteList" type="checkbox"> 跳过白名单文件</label>
+    </div>
+
+    <section class="grid">
+      <div>
+        <label for="retentionDays">保留天数</label>
+        <input id="retentionDays" type="number" min="1" max="3650">
+        <div class="small">删除早于这个天数的文件，例如 180 表示保留最近 180 天。</div>
+      </div>
+      <div>
+        <label for="batchSize">每次最多删除</label>
+        <input id="batchSize" type="number" min="1" max="5000">
+        <div class="small">建议 500 到 2000。数量越大，单次执行压力越高。</div>
+      </div>
+      <div>
+        <label for="intervalHours">执行间隔（小时）</label>
+        <input id="intervalHours" type="number" min="1" max="720">
+        <div class="small">例如 12 表示每 12 小时自动检查一次。</div>
+      </div>
+      <div>
+        <label for="excludeTags">排除标签</label>
+        <input id="excludeTags" type="text" placeholder="keep,永久保留">
+        <div class="small">多个用英文逗号分隔。</div>
+      </div>
+      <div style="grid-column: 1 / -1;">
+        <label for="excludeDirs">排除目录</label>
+        <textarea id="excludeDirs" placeholder="avatar/,important/"></textarea>
+        <div class="small">多个用英文逗号分隔。目录内所有子文件也会跳过。</div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="saveBtn">保存设置</button>
+      <button id="reloadBtn" class="secondary">重新加载</button>
+      <button id="runBtn" class="danger">立即执行一次</button>
+    </div>
+
+    <section class="status">
+      <h2>运行状态</h2>
+      <div class="rows">
+        <div class="row"><span>当前状态</span><strong id="running">-</strong></div>
+        <div class="row"><span>模式</span><strong id="mode">-</strong></div>
+        <div class="row"><span>上次开始</span><strong id="lastStartedAt">-</strong></div>
+        <div class="row"><span>上次结束</span><strong id="lastFinishedAt">-</strong></div>
+        <div class="row"><span>下次执行</span><strong id="nextRunAt">-</strong></div>
+        <div class="row"><span>保留天数</span><strong id="retentionInfo">-</strong></div>
+      </div>
+      <div id="message" class="message">加载中...</div>
+    </section>
+
+    <details>
+      <summary>查看清理日志</summary>
+      <div id="logList" class="log-list"></div>
+    </details>
+  </main>
+
+  <script>
+    const api = '/api/manage/cleanup';
+    const fields = ['enabled', 'dryRun', 'keepWhiteList', 'retentionDays', 'batchSize', 'intervalHours', 'excludeTags', 'excludeDirs'];
+    const buttons = ['saveBtn', 'reloadBtn', 'runBtn'].map(id => document.getElementById(id));
+    const params = new URLSearchParams(location.search);
+    if (params.get('embedded') === '1') {
+      document.body.classList.add('embedded');
+      const login = document.querySelector('.top .button');
+      if (login) login.style.display = 'none';
+    }
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function setBusy(isBusy) {
+      buttons.forEach(button => button.disabled = isBusy);
+    }
+
+    function formatTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return date.toLocaleString();
+    }
+
+    function number(value) {
+      return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '-';
+    }
+
+    function readForm() {
+      return {
+        enabled: $('enabled').checked,
+        dryRun: $('dryRun').checked,
+        keepWhiteList: $('keepWhiteList').checked,
+        retentionDays: Number($('retentionDays').value),
+        batchSize: Number($('batchSize').value),
+        intervalHours: Number($('intervalHours').value),
+        excludeTags: $('excludeTags').value,
+        excludeDirs: $('excludeDirs').value,
+      };
+    }
+
+    function fillForm(config) {
+      for (const key of fields) {
+        const el = $(key);
+        if (el.type === 'checkbox') el.checked = Boolean(config[key]);
+        else el.value = config[key] ?? '';
+      }
+    }
+
+    function render(data, actionText) {
+      const config = data.config || {};
+      const status = data.status || {};
+      const result = data.result || status.lastResult || {};
+
+      $('metricScanned').textContent = number(result.scanned);
+      $('metricMatched').textContent = number(result.matched);
+      $('metricDeleted').textContent = number(result.deleted);
+      $('metricFailed').textContent = number(result.failed);
+      $('running').textContent = status.running ? '运行中' : '空闲';
+      $('mode').textContent = config.dryRun ? '试运行，不删除' : '真实删除';
+      $('lastStartedAt').textContent = formatTime(status.lastStartedAt);
+      $('lastFinishedAt').textContent = formatTime(status.lastFinishedAt);
+      $('nextRunAt').textContent = formatTime(status.nextRunAt);
+      $('retentionInfo').textContent = `${config.retentionDays || '-'} 天`;
+
+      if (result.success === false) {
+        $('message').textContent = `执行失败：${result.error || result.reason || '未知错误'}`;
+      } else if (actionText) {
+        $('message').textContent = actionText;
+      } else if (result.cutoffISO) {
+        $('message').textContent = `上次清理截止时间：${formatTime(result.cutoffISO)}。扫描 ${number(result.scanned)} 个，匹配 ${number(result.matched)} 个，删除 ${number(result.deleted)} 个，失败 ${number(result.failed)} 个。`;
+      } else {
+        $('message').textContent = '还没有执行记录。保存设置后可以先立即执行一次试运行。';
+      }
+
+      renderLogs(status.logs || []);
+    }
+
+    function renderLogs(logs) {
+      const list = $('logList');
+      if (!logs.length) {
+        list.innerHTML = '<div class="small">暂无清理日志。</div>';
+        return;
+      }
+      list.innerHTML = logs.map((log, index) => `
+        <div class="log-item">
+          <div class="log-title">
+            <span>#${index + 1} ${log.success === false ? '执行失败' : '执行完成'}</span>
+            <span>${formatTime(log.finishedAt || log.cutoffISO)}</span>
+          </div>
+          <div class="log-grid">
+            <span>模式：${log.dryRun ? '试运行' : '真实删除'}</span>
+            <span>扫描：${number(log.scanned)}</span>
+            <span>匹配：${number(log.matched)}</span>
+            <span>删除：${number(log.deleted)}</span>
+            <span>失败：${number(log.failed)}</span>
+            <span>跳过：${number(log.skipped)}</span>
+            <span>保留：${number(log.retentionDays)} 天</span>
+            <span>截止：${formatTime(log.cutoffISO)}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function request(url, options) {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      return response.json();
+    }
+
+    async function load(actionText = '') {
+      setBusy(true);
+      try {
+        const data = await request(api);
+        fillForm(data.config);
+        render(data, actionText);
+      } catch (error) {
+        $('message').textContent = `加载失败：${error.message}。请确认已经登录管理端。`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function save() {
+      setBusy(true);
+      try {
+        const data = await request(api, {
+          method: 'POST',
+          body: JSON.stringify(readForm()),
+        });
+        fillForm(data.config);
+        render(data, '设置已保存。');
+      } catch (error) {
+        $('message').textContent = `保存失败：${error.message}`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function runNow() {
+      const form = readForm();
+      const warning = form.dryRun
+        ? '当前是试运行，只会统计不会删除。是否继续？'
+        : '当前会真实删除匹配文件。确认已经备份并继续？';
+      if (!confirm(warning)) return;
+
+      setBusy(true);
+      $('message').textContent = '正在执行，请稍候...';
+      try {
+        const data = await request(api, { method: 'PUT' });
+        fillForm(data.config);
+        const result = data.result || {};
+        render(data, `执行完成：扫描 ${number(result.scanned)} 个，匹配 ${number(result.matched)} 个，删除 ${number(result.deleted)} 个，失败 ${number(result.failed)} 个。`);
+      } catch (error) {
+        $('message').textContent = `执行失败：${error.message}`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    $('saveBtn').addEventListener('click', save);
+    $('reloadBtn').addEventListener('click', () => load('已重新加载最新状态。'));
+    $('runBtn').addEventListener('click', runNow);
+    load();
+  </script>
+</body>
+</html>

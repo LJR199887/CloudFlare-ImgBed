@@ -13,6 +13,7 @@ import { join, resolve, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { SqliteD1 } from './sqliteD1.js';
 import { LocalR2Storage } from './r2Storage.js';
+import { startCleanupScheduler } from './cleanupScheduler.js';
 
 const NativeResponse = globalThis.Response;
 
@@ -413,4 +414,5 @@ serve({
     console.log(`Server running at http://0.0.0.0:${info.port}`);
     console.log(`Data directory: ${DATA_DIR}`);
     console.log(`Mode: Docker (Native Node.js)`);
+    startCleanupScheduler({ createEnv, port: info.port });
 });
