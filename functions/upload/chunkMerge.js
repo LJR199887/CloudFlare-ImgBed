@@ -294,7 +294,7 @@ async function mergeR2ChunksInfo(context, uploadId, completedChunks, metadata) {
         const returnFormat = url.searchParams.get('returnFormat') || 'default';
         let updatedReturnLink = '';
         if (returnFormat === 'full') {
-            updatedReturnLink = `${url.origin}/file/${finalFileId}`;
+            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
         } else {
             updatedReturnLink = `/file/${finalFileId}`;
         }
@@ -405,7 +405,7 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
         const returnFormat = url.searchParams.get('returnFormat') || 'default';
         let updatedReturnLink = '';
         if (returnFormat === 'full') {
-            updatedReturnLink = `${url.origin}/file/${finalFileId}`;
+            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
         } else {
             updatedReturnLink = `/file/${finalFileId}`;
         }
@@ -484,7 +484,7 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         const returnFormat = url.searchParams.get('returnFormat') || 'default';
         let updatedReturnLink = '';
         if (returnFormat === 'full') {
-            updatedReturnLink = `${url.origin}/file/${finalFileId}`;
+            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
         } else {
             updatedReturnLink = `/file/${finalFileId}`;
         }
@@ -564,7 +564,7 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
         const returnFormat = url.searchParams.get('returnFormat') || 'default';
         let updatedReturnLink = '';
         if (returnFormat === 'full') {
-            updatedReturnLink = `${url.origin}/file/${finalFileId}`;
+            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
         } else {
             updatedReturnLink = `/file/${finalFileId}`;
         }

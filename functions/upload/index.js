@@ -195,7 +195,7 @@ async function processFileUpload(context, formdata = null) {
     const returnFormat = url.searchParams.get('returnFormat') || 'default';
     let returnLink = '';
     if (returnFormat === 'full') {
-        returnLink = `${url.origin}/file/${fullId}`;
+        returnLink = `https://${url.host}/file/${fullId}`;
     } else {
         returnLink = `/file/${fullId}`;
     }
