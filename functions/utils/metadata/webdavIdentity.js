@@ -30,8 +30,35 @@ export async function getMetadataWebDAVAccountId(metadata = {}) {
     return getWebDAVAccountId({ baseUrl: metadata.WebDAVBaseUrl, username: metadata.WebDAVUsername, password: metadata.WebDAVPassword, headers: metadata.WebDAVHeaders });
 }
 
+export function hasWebDAVPassword(config = {}) {
+    if (config.password) return true;
+    try { return Boolean(new URL(config.baseUrl || config.endpoint || config.url).password); }
+    catch { return false; }
+}
+
+// Old redacted records have no password-presence bit. A bare basic username
+// cannot prove a formerly password-protected file is usable. Fail closed for
+// those records, but allow explicitly passwordless, anonymous and header auth.
+export function satisfiesWebDAVAuth(channel, metadata) {
+    if (hasWebDAVPassword(channel)) return true;
+    if (metadata.WebDAVRequiresPassword === true || metadata.WebDAVPassword ||
+        hasWebDAVPassword({ baseUrl: metadata.WebDAVBaseUrl })) return false;
+    if (metadata.WebDAVRequiresPassword === false || !metadata.WebDAVAccountId) return true;
+    let username = channel.username;
+    try { username ||= new URL(channel.baseUrl || channel.endpoint || channel.url).username; } catch { /* no URL */ }
+    return !username || new Headers(normalizeWebDAVHeaders(channel.headers || channel.customHeaders)).has('Authorization');
+}
+
 export async function prepareMetadataForStorage(metadata = {}) {
     const copy = { ...metadata };
+    if (copy.Channel === 'WebDAV') {
+        if (hasWebDAVPassword({ baseUrl: copy.WebDAVBaseUrl, password: copy.WebDAVPassword })) {
+            copy.WebDAVRequiresPassword = true;
+        } else if (copy.WebDAVRequiresPassword == null && !copy.WebDAVAccountId &&
+                   Object.hasOwn(copy, 'WebDAVPassword')) {
+            copy.WebDAVRequiresPassword = false;
+        }
+    }
     if (copy.Channel === 'WebDAV' && !copy.WebDAVAccountId) {
         const accountId = await getMetadataWebDAVAccountId(copy);
         if (accountId) copy.WebDAVAccountId = accountId;

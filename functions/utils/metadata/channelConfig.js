@@ -3,7 +3,7 @@
  * 负责从当前上传配置中定位历史文件 metadata 对应的渠道配置
  */
 import { getUploadConfig } from '../../api/manage/sysConfig/upload.js';
-import { getWebDAVAccountId, getMetadataWebDAVAccountId } from './webdavIdentity.js';
+import { getWebDAVAccountId, getMetadataWebDAVAccountId, satisfiesWebDAVAuth } from './webdavIdentity.js';
 
 // 旧 metadata 中可能保存过渠道身份字段，按强匹配到弱匹配依次尝试
 const CHANNEL_IDENTITY_RULES = {
@@ -97,7 +97,7 @@ export async function findConfiguredChannel(uploadConfig, groupName, metadata = 
     const expectedAccount = await getMetadataWebDAVAccountId(metadata);
     if (expectedAccount) {
       const accounts = await Promise.all(channels.map(channel => getWebDAVAccountId(channel)));
-      channels = channels.filter((channel, index) => accounts[index] === expectedAccount);
+      channels = channels.filter((channel, index) => accounts[index] === expectedAccount && satisfiesWebDAVAuth(channel, metadata));
     }
   }
   // 优先使用当前版本写入的渠道名，避免多渠道配置相似时误匹配

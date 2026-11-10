@@ -11,6 +11,7 @@ import {
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { hydrateFileCredentials } from '../utils/metadata/fileCredentials.js';
+import { httpFileUrl, pickHeaders, DOWNLOAD_RESPONSE_HEADERS } from '../utils/downloadPolicy.js';
 import { stripUrlUserinfo } from '../utils/metadata/metadataSecurity.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
 
@@ -25,6 +26,11 @@ export async function onRequest(context) {  // Contents of context object
         data, // arbitrary space for passing data between middlewares
     } = context;
 
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range, If-Range, If-None-Match, If-Modified-Since',
+    } });
+    if (!['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD, OPTIONS' } });
     // 解码文件ID
     let fileId = '';
     try {
@@ -106,7 +112,8 @@ export async function onRequest(context) {  // Contents of context object
     /* 外链渠道 */
     if (imgRecord.metadata?.Channel === 'External') {
         // 直接重定向到外链
-        return Response.redirect(imgRecord.metadata?.ExternalLink, 302);
+        const target = httpFileUrl(imgRecord.metadata.ExternalLink);
+        return target ? Response.redirect(target.href, 302) : new Response('Invalid external link', { status: 400 });
     }
 
     /* Telegram及Telegraph渠道 */
@@ -159,7 +166,7 @@ export async function onRequest(context) {  // Contents of context object
             return await return404(url);
         }
 
-        const headers = new Headers(response.headers);
+        const headers = pickHeaders(response.headers, DOWNLOAD_RESPONSE_HEADERS);
         setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
 
         const newRes = new Response(response.body, {
@@ -254,11 +261,7 @@ async function handleTelegramChunkedFile(context, imgRecord, encodedFileName, fi
     if (ifNoneMatch && ifNoneMatch === etag) {
         return new Response(null, {
             status: 304,
-            headers: {
-                'ETag': etag,
-                'Cache-Control': headers.get('Cache-Control'),
-                'Accept-Ranges': 'bytes'
-            }
+            headers: pickHeaders(headers, ['ETag', 'Cache-Control', 'Accept-Ranges', 'Content-Security-Policy', 'X-Content-Type-Options', 'Content-Disposition', 'Content-Type', 'Vary'])
         });
     }
 
@@ -445,11 +448,7 @@ async function handleDiscordChunkedFile(context, imgRecord, encodedFileName, fil
     if (ifNoneMatch && ifNoneMatch === etag) {
         return new Response(null, {
             status: 304,
-            headers: {
-                'ETag': etag,
-                'Cache-Control': headers.get('Cache-Control'),
-                'Accept-Ranges': 'bytes'
-            }
+            headers: pickHeaders(headers, ['ETag', 'Cache-Control', 'Accept-Ranges', 'Content-Security-Policy', 'X-Content-Type-Options', 'Content-Disposition', 'Content-Type', 'Vary'])
         });
     }
 
@@ -885,7 +884,6 @@ async function handleHuggingFaceFile(context, metadata, encodedFileName, fileTyp
         }
 
         // 构建文件 URL
-        const fileUrl = metadata.HfFileUrl || `https://huggingface.co/datasets/${hfRepo}/resolve/main/${hfFilePath}`;
         const fileSize = HuggingFaceAPI.getMetadataFileSize(metadata);
 
         // 处理 HEAD 请求
@@ -898,24 +896,9 @@ async function handleHuggingFaceFile(context, metadata, encodedFileName, fileTyp
             return handleHeadRequest(headers);
         }
 
-        // 构建请求头
-        const fetchHeaders = {};
-
-        // 私有仓库需要 Authorization
-        if (hfIsPrivate && hfToken) {
-            fetchHeaders['Authorization'] = `Bearer ${hfToken}`;
-        }
-
-        // 支持 Range 请求
-        const range = request.headers.get('Range');
-        if (range) {
-            fetchHeaders['Range'] = range;
-        }
-
-        const response = await fetch(fileUrl, {
-            method: 'GET',
-            headers: fetchHeaders
-        });
+        // A stored URL must never select the destination for a configured token.
+        const api = new HuggingFaceAPI(hfToken, hfRepo, hfIsPrivate);
+        const response = await api.getFileContent(hfFilePath, request.headers.get('Range'));
 
         if (!response.ok && response.status !== 206) {
             return new Response(`Error: Failed to fetch from HuggingFace - ${response.status}`, { status: response.status });

@@ -14,7 +14,8 @@ import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { resolveFileType } from '../utils/mimeTypes.js';
-import { getWebDAVAccountId } from '../utils/metadata/webdavIdentity.js';
+import { getWebDAVAccountId, hasWebDAVPassword } from '../utils/metadata/webdavIdentity.js';
+import { httpFileUrl } from '../utils/downloadPolicy.js';
 
 
 export async function onRequest(context) {  // Contents of context object
@@ -591,11 +592,11 @@ async function uploadFileToExternal(context, fullId, metadata, returnLink) {
     metadata.Channel = "External";
     metadata.ChannelName = "External";
     // 从 formdata 中获取外链
-    const extUrl = formdata.get('url');
-    if (extUrl === null || extUrl === undefined) {
-        return createResponse('Error: No url provided', { status: 400 });
+    const extUrl = httpFileUrl(formdata.get('url'));
+    if (!extUrl) {
+        return createResponse('Error: An HTTP(S) URL without credentials is required', { status: 400 });
     }
-    metadata.ExternalLink = extUrl;
+    metadata.ExternalLink = extUrl.href;
     // 写入KV数据库
     try {
         await db.put(fullId, "", {
@@ -880,6 +881,7 @@ async function uploadFileToWebDAV(context, fullId, metadata, returnLink) {
         metadata.ChannelName = webdavChannel.name || "WebDAV_env";
         metadata.WebDAVBaseUrl = baseUrl;
         metadata.WebDAVAccountId = await getWebDAVAccountId(webdavChannel);
+        metadata.WebDAVRequiresPassword = hasWebDAVPassword(webdavChannel);
         metadata.WebDAVFilePath = fullId;
         if (webdavChannel.publicUrl) {
             metadata.WebDAVPublicBaseUrl = webdavChannel.publicUrl;

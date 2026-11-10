@@ -7,6 +7,7 @@
 
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { prepareMetadataForBackup } from '../../../utils/metadata/writeSafety.js';
+import { prepareMetadataForStorage } from '../../../utils/metadata/webdavIdentity.js';
 import { loadChannelConfig } from '../../../utils/metadata/channelConfig.js';
 import { needsChunkManifest, parseChunkManifest } from '../../../utils/chunkManifest.js';
 
@@ -115,7 +116,9 @@ export async function onRequestGet(context) {
       // 构建记录对象
       const record = {
         id: item.name,
-        metadata: await prepareMetadataForBackup(db, env, item.metadata, getBackupConfig),
+        metadata: includeValue
+          ? await prepareMetadataForBackup(db, env, item.metadata, getBackupConfig)
+          : await prepareMetadataForStorage(item.metadata),
       };
 
       // 如果需要包含 value 且是分块文件，读取 value

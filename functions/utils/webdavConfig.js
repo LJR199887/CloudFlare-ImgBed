@@ -2,7 +2,7 @@ import { getUploadConfig } from '../api/manage/sysConfig/upload.js';
 import { getDatabase } from './databaseAdapter.js';
 import { normalizeWebDAVHeaders } from './storage/webdavAPI.js';
 import { findConfiguredChannel } from './metadata/channelConfig.js';
-import { getWebDAVAccountId } from './metadata/webdavIdentity.js';
+import { getWebDAVAccountId, satisfiesWebDAVAuth } from './metadata/webdavIdentity.js';
 
 export async function resolveWebDAVConfig(env, metadata = {}) {
     const metadataBaseUrl = metadata.WebDAVBaseUrl;
@@ -31,6 +31,7 @@ export async function resolveWebDAVConfig(env, metadata = {}) {
     });
     // A credential-free record bound to a private account must not silently
     // fall back to anonymous access when its channel is missing or replaced.
+    if (fallback && !satisfiesWebDAVAuth(fallback, metadata)) return null;
     if (fallback && metadata.WebDAVAccountId &&
         await getWebDAVAccountId(fallback) !== metadata.WebDAVAccountId) return null;
     return fallback;

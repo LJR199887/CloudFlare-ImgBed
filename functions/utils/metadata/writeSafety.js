@@ -1,5 +1,5 @@
 import { findConfiguredChannel, loadChannelConfig } from './channelConfig.js';
-import { prepareMetadataForStorage, getWebDAVAccountId } from './webdavIdentity.js';
+import { prepareMetadataForStorage, getWebDAVAccountId, hasWebDAVPassword, satisfiesWebDAVAuth } from './webdavIdentity.js';
 
 const GROUPS = { S3: 's3', Telegram: 'telegram', TelegramNew: 'telegram', Discord: 'discord', HuggingFace: 'huggingface', WebDAV: 'webdav' };
 
@@ -15,6 +15,7 @@ export async function prepareMetadataForBackup(db, env, metadata, getConfig = ()
         const channel = await findConfiguredChannel(config, 'webdav', metadata);
         if (!channel) throw new Error('Cannot back up unbound WebDAV file: restore its matching storage channel configuration first.');
         prepared.WebDAVAccountId = await getWebDAVAccountId(channel);
+        prepared.WebDAVRequiresPassword = hasWebDAVPassword(channel);
     }
     return prepared;
 }
@@ -30,7 +31,8 @@ export async function assertRestoredFileSafe(db, env, metadata) {
     }
     const config = await loadChannelConfig(db, env, 'file restore');
     const channel = await findConfiguredChannel(config, group, prepared);
-    if (!channel || !hasReplacementCredentials(channel, group, metadata)) {
+    if (!channel || !hasReplacementCredentials(channel, group, metadata) ||
+        (group === 'webdav' && !satisfiesWebDAVAuth(channel, prepared))) {
         throw new Error('Cannot restore file: restore its matching storage channel configuration first, then retry the file operation.');
     }
 }

@@ -50,6 +50,8 @@ export class WebDAVAPI {
     }
 
     async ensureDirectory(path) {
+        // Reject the complete path before the first MKCOL/MOVE side effect.
+        this.buildObjectUrl(path);
         if (!this.createDirectory) return;
 
         const dirParts = getDirectoryParts(path);
@@ -106,9 +108,10 @@ export class WebDAVAPI {
     }
 
     async moveFile(oldPath, newPath, overwrite = true) {
+        const source = this.buildObjectUrl(oldPath);
         await this.ensureDirectory(newPath);
 
-        const response = await fetch(this.buildObjectUrl(oldPath), {
+        const response = await fetch(source, {
             method: 'MOVE',
             headers: this.getRequestHeaders({
                 Destination: this.buildObjectUrl(newPath),
@@ -163,6 +166,9 @@ export function normalizeBaseUrl(baseUrl) {
 }
 
 export function buildWebDAVUrl(baseUrl, path) {
+    if (String(path).split(/[\\/]/).some(part => part === '.' || part === '..')) {
+        throw new Error('Invalid relative WebDAV path');
+    }
     const cleanPath = String(path || '')
         .replace(/^\/+/, '')
         .split('/')

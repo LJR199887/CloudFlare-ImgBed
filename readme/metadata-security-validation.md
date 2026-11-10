@@ -44,3 +44,38 @@ userinfo/匿名账号、备份往返、各渠道重命名响应、Discord 分片
 
 远端存储服务通过可控响应模拟；这些测试不等价于真实 Cloudflare、Discord、
 S3、WebDAV 账号的线上联调，也不包含整个项目的依赖漏洞修复。
+
+## 合并前的跨链路检查
+
+- 文件出口共用同一策略：已知的普通图片、音视频、纯文本和 PDF 可内联，其余
+  内容（包括 HTML、SVG、JavaScript、XML 和未知 MIME）以二进制附件下载。
+  同时下发 `nosniff` 和沙箱 CSP。已存在的记录不需要重写。随机文件字节响应、
+  WebDAV 文件下载和粘贴链接下载也不能转发远端任意响应头。
+- 普通 Telegram 下载只转发范围和条件请求头，不转发站点 Cookie、Authorization
+  或自定义 API 密钥。私有 Hugging Face 从仓库名和路径构造地址，不使用 metadata
+  提供的下载 URL 发送 token；跳转到其他来源时移除 token。
+- WebDAV 文件可附带非敏感布尔值 `WebDAVRequiresPassword`。它不参与账号摘要，
+  允许更换密码，但要求对应配置仍有密码。仅有旧账号摘要且配置只有 Basic 用户名、
+  无密码的情况会保守拒绝；确认是有意的无密码账号后，应使用带明确认证要求的新备份。
+  索引重建不需要渠道在线，完整备份和恢复仍实施身份校验。
+- Docker 中粘贴链接获取文件，以及随机/DAV 取外链字节时，不允许访问本机或私有
+  网络；每个跳转都重新验证，连接使用经验证的 IP。不影响管理员显式配置的私有
+  WebDAV/S3 存储。可设置 `FETCH_RES_ALLOWED_ORIGINS`，形如
+  `https://images.example,https://cdn.example`，限制这些外部下载的初始来源及跳转来源。
+  不要将不可信服务放在同一可信出口或直接将公开图库与管理应用共用不受控的 CDN。
+- **部署时清理旧的文件响应缓存**（包括已有 CDN 缓存的 `/file/*` 和随机文件响应）。
+  新代码不能撤销客户端已经收到的旧响应。直接返回原始对象的独立存储/CDN 域名
+  不会经过本应用的响应策略，请隔离域名，不要让它承载管理应用的 Cookie。
+
+以下命令验证编译后的 Worker，而不是替换路由依赖的单元测试。仅使用本地临时
+KV/R2 和假渠道，不需要生产密钥。Windows 示例：
+
+```powershell
+$out = Join-Path $env:TEMP 'imgbed-review-worker'
+npx --no-install wrangler pages functions build functions --outdir $out
+node scripts/verify-file-boundaries.mjs (Join-Path $out 'index.js') 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+```
+
+最后一个参数可省略：提供时启动独立的临时无头浏览器，验证上传的 HTML 和 JS
+不会在页面中执行，并以成功解码 PNG 为对照。PR 检查运行 Node 22/24 的全量测试
+及编译产物 HTTP 冒烟测试，不部署、不读取仓库 Secrets。

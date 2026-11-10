@@ -49,6 +49,17 @@ export function stripSensitiveMetadata(metadata = {}) {
   return stripSensitiveMetadataInPlace(stripped);
 }
 
+// The binding is needed for restores, not public gallery clients. For old
+// password-only or token-header accounts the digest can verify offline guesses.
+export function publicFileMetadata(metadata) {
+  const result = stripSensitiveMetadata(metadata);
+  if (result && typeof result === 'object') {
+    delete result.WebDAVAccountId;
+    delete result.WebDAVRequiresPassword;
+  }
+  return result;
+}
+
 // 返回移除配置派生字段后的 metadata 副本
 export function stripConfigDerivedMetadata(metadata = {}) {
   if (!metadata || typeof metadata !== 'object') {
