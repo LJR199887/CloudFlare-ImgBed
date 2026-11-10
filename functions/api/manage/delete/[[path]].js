@@ -133,7 +133,7 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
         const img = await db.getWithMetadata(fileId);
 
         // 如果文件记录不存在，直接返回成功（幂等删除）
-        if (!img) {
+        if (!img || (img.value == null && !img.metadata)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
             return true;
         }
@@ -215,20 +215,45 @@ async function deleteS3File(img) {
 async function deleteDiscordFile(img) {
     const botToken = img.metadata?.DiscordBotToken;
     const channelId = img.metadata?.DiscordChannelId;
-    const messageId = img.metadata?.DiscordMessageId;
-
-    if (!botToken || !channelId || !messageId) {
+    if (!botToken || !channelId) {
         console.warn('Discord file missing required metadata for deletion');
         return false;
     }
 
     try {
-        const discordAPI = new DiscordAPI(botToken);
-        const success = await discordAPI.deleteMessage(channelId, messageId);
-        if (!success) {
-            console.error('Discord Delete Failed: API returned false');
+        let messageIds;
+        if (img.metadata.IsChunked) {
+            const chunks = JSON.parse(img.value);
+            const expected = img.metadata.TotalChunks;
+            // Validate the entire manifest before deleting anything. A broken
+            // manifest must not cause a partially destroyed file or a lost row.
+            if (!Array.isArray(chunks) || chunks.length === 0 ||
+                (expected != null && (!Number.isInteger(expected) || expected !== chunks.length)) ||
+                chunks.some(chunk => !chunk || !Number.isInteger(chunk.index) ||
+                    chunk.index < 0 || chunk.index >= chunks.length ||
+                    typeof chunk.messageId !== 'string' || !chunk.messageId.trim()) ||
+                new Set(chunks.map(chunk => chunk.index)).size !== chunks.length) {
+                throw new Error('Invalid Discord chunk manifest');
+            }
+            messageIds = [...new Set(chunks.map(chunk => chunk.messageId))];
+        } else {
+            const messageId = img.metadata.DiscordMessageId;
+            if (typeof messageId !== 'string' || !messageId.trim()) {
+                throw new Error('Discord file missing message ID');
+            }
+            messageIds = [messageId];
         }
-        return success;
+        const discordAPI = new DiscordAPI(botToken);
+        // Sequential requests avoid a burst against the channel rate limit.
+        // Keep the full manifest on failure; already-deleted messages succeed
+        // idempotently on the next manual/automatic cleanup attempt.
+        for (const messageId of messageIds) {
+            if (!await discordAPI.deleteMessage(channelId, messageId)) {
+                console.error('Discord Delete Failed: API returned false');
+                return false;
+            }
+        }
+        return true;
     } catch (error) {
         console.error("Discord Delete Failed:", error);
         return false;

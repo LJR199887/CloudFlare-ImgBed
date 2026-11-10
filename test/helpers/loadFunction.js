@@ -5,8 +5,8 @@ import { dirname, resolve } from 'node:path';
 let sequence = 0;
 
 // Exercise real modules while isolating external dependencies. MIME and upload-format
-// imports always use the shared utilities; serverImports.mjs also checks unmodified imports
-// with the production loader, which this isolated loader cannot validate.
+// imports always use the shared utilities. Also smoke-test unmodified imports
+// with deploy/server/register.mjs; this isolated loader cannot validate them.
 export async function loadFunction(path, mocks = {}, globals = {}) {
     const filename = resolve(path);
     const key = `__functionTest${sequence++}`;

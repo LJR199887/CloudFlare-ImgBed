@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { createDatabaseAdapter } from '../functions/utils/databaseAdapter.js';
 import { hydrateFileCredentials } from '../functions/utils/metadata/fileCredentials.js';
 import { stripSensitiveMetadata } from '../functions/utils/metadata/metadataSecurity.js';
+import { assertRestoredFileSafe } from '../functions/utils/metadata/writeSafety.js';
 import { loadFunction, memoryDatabase } from './helpers/loadFunction.js';
 
 // Exercise both real adapters; only the KV/D1 transport is in memory.
@@ -44,7 +45,7 @@ const examples = [
 ];
 
 async function restore(env, type, data) {
-    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter });
+    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
     const response = await route.onRequestPost({ env, request: new Request('https://img.example/api/manage/batch/restore/chunk', {
         method: 'POST', body: JSON.stringify({ type, data }),
     }) });

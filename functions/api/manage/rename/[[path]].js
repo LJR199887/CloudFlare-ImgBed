@@ -7,6 +7,7 @@ import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
 import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
 import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
 import { assertLegacyWriteSafe } from '../../../utils/metadata/writeSafety.js';
+import { prepareMetadataForStorage } from '../../../utils/metadata/webdavIdentity.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -197,7 +198,7 @@ export async function onRequest(context) {
         return new Response(JSON.stringify({
             success: true,
             newFileId,
-            metadata,
+            metadata: await prepareMetadataForStorage(metadata),
         }), {
             status: 200,
             headers: { 'Content-Type': 'application/json', ...corsHeaders },

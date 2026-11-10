@@ -1,7 +1,39 @@
 import { findConfiguredChannel, loadChannelConfig } from './channelConfig.js';
-import { prepareMetadataForStorage } from './webdavIdentity.js';
+import { prepareMetadataForStorage, getWebDAVAccountId } from './webdavIdentity.js';
 
 const GROUPS = { S3: 's3', Telegram: 'telegram', TelegramNew: 'telegram', Discord: 'discord', HuggingFace: 'huggingface', WebDAV: 'webdav' };
+
+// Unlike display-only metadata, backups must retain the identity needed to
+// resolve credentials later. Never derive a legacy account from a replacement
+// channel when the record still contains its own identity/credentials.
+export async function prepareMetadataForBackup(db, env, metadata, getConfig = () => loadChannelConfig(db, env, 'WebDAV backup')) {
+    const prepared = await prepareMetadataForStorage(metadata);
+    if (prepared.Channel === 'WebDAV' && !prepared.WebDAVAccountId) {
+        // Original WebDAV uploads did not store credentials at all. Bind these
+        // unbound records to the channel they currently resolve to before export.
+        const config = await getConfig();
+        const channel = await findConfiguredChannel(config, 'webdav', metadata);
+        if (!channel) throw new Error('Cannot back up unbound WebDAV file: restore its matching storage channel configuration first.');
+        prepared.WebDAVAccountId = await getWebDAVAccountId(channel);
+    }
+    return prepared;
+}
+
+// Restores must also validate already-redacted backups; there may be no legacy
+// secret left to trigger assertLegacyWriteSafe. Restore settings before files.
+export async function assertRestoredFileSafe(db, env, metadata) {
+    const group = GROUPS[metadata?.Channel];
+    if (!group) return;
+    const prepared = await prepareMetadataForStorage(metadata);
+    if (group === 'webdav' && !prepared.WebDAVAccountId) {
+        throw new Error('Cannot restore unbound WebDAV backup: export a new backup from the original instance with its matching channel configured.');
+    }
+    const config = await loadChannelConfig(db, env, 'file restore');
+    const channel = await findConfiguredChannel(config, group, prepared);
+    if (!channel || !hasReplacementCredentials(channel, group, metadata)) {
+        throw new Error('Cannot restore file: restore its matching storage channel configuration first, then retry the file operation.');
+    }
+}
 
 // Do not erase the only remaining credentials during an edit or backup restore.
 // Check both sides: imports may target an empty database, while updates may omit

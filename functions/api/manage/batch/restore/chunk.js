@@ -5,6 +5,7 @@
  */
 
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
+import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -73,6 +74,12 @@ export async function onRequestPost(context) {
       // 恢复文件数据 - 并行写入
       const filePromises = Object.entries(data).map(async ([key, fileData]) => {
         try {
+          if (!fileData || typeof fileData !== 'object' || !fileData.metadata ||
+              typeof fileData.metadata !== 'object' || Array.isArray(fileData.metadata) ||
+              key.startsWith('manage@') || key.startsWith('chunk_')) {
+            throw new Error('Invalid file backup record');
+          }
+          await assertRestoredFileSafe(db, env, fileData.metadata);
           if (fileData.value) {
             // 有 value 的文件（如 Telegram/Discord 分块文件）
             await db.put(key, fileData.value, {

@@ -6,7 +6,8 @@
  */
 
 import { getDatabase } from '../../../utils/databaseAdapter.js';
-import { stripSensitiveMetadata } from '../../../utils/metadata/metadataSecurity.js';
+import { prepareMetadataForBackup } from '../../../utils/metadata/writeSafety.js';
+import { loadChannelConfig } from '../../../utils/metadata/channelConfig.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -105,6 +106,10 @@ export async function onRequestGet(context) {
 
     // 处理记录
     const records = [];
+    // A page can contain 1,000 original WebDAV records. Load shared channel
+    // configuration at most once, not once per file/KV subrequest.
+    let backupConfig;
+    const getBackupConfig = () => backupConfig ??= loadChannelConfig(db, env, 'file backup');
     
     for (const item of listResult.keys) {
       // 跳过管理相关的键（以 manage@ 开头）
@@ -125,7 +130,7 @@ export async function onRequestGet(context) {
       // 构建记录对象
       const record = {
         id: item.name,
-        metadata: stripSensitiveMetadata(item.metadata),
+        metadata: await prepareMetadataForBackup(db, env, item.metadata, getBackupConfig),
       };
 
       // 如果需要包含 value 且是分块文件，读取 value
