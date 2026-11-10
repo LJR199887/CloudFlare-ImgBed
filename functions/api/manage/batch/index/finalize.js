@@ -7,6 +7,7 @@
  */
 
 import { getDatabase, checkDatabaseConfig } from '../../../../utils/databaseAdapter.js';
+import { stripSensitiveMetadata } from '../../../../utils/metadata/metadataSecurity.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -199,6 +200,7 @@ function assembleChunks(chunks) {
  */
 async function saveIndex(db, files, env) {
   try {
+    files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
     const chunks = [];
     

@@ -10,6 +10,7 @@ import {
     returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
+import { hydrateFileCredentials } from '../utils/metadata/fileCredentials.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
 
 
@@ -60,6 +61,7 @@ export async function onRequest(context) {  // Contents of context object
     if (!imgRecord.metadata) {
         imgRecord.metadata = {};
     }
+    imgRecord.metadata = await hydrateFileCredentials(env, imgRecord.metadata);
 
     const fileName = imgRecord.metadata?.FileName || fileId;
     const encodedFileName = encodeURIComponent(fileName);

@@ -1,5 +1,6 @@
 import { addFileToIndex } from '../../../utils/indexManager.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
+import { stripSensitiveMetadata } from '../../../utils/metadata/metadataSecurity.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -102,7 +103,7 @@ export async function onRequest(context) {
 
         return new Response(JSON.stringify({
             success: true,
-            metadata: updatedMetadata,
+            metadata: stripSensitiveMetadata(updatedMetadata),
         }), {
             status: 200,
             headers: { 'Content-Type': 'application/json', ...corsHeaders },

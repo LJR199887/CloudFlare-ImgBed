@@ -13,6 +13,7 @@ import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
+import { resolveFileType } from '../utils/mimeTypes.js';
 
 
 export async function onRequest(context) {  // Contents of context object
@@ -133,8 +134,8 @@ async function processFileUpload(context, formdata = null) {
     // 获取文件信息
     const time = new Date().getTime();
     const file = formdata.get('file');
-    const fileType = file.type;
     let fileName = file.name;
+    const fileType = resolveFileType(fileName, file.type);
     const fileSizeBytes = file.size; // 文件大小，单位字节
     const fileSize = (fileSizeBytes / 1024 / 1024).toFixed(2); // 文件大小，单位MB
 
@@ -293,7 +294,9 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
     const R2DataBase = env.img_r2;
 
     // 写入R2数据库
-    await R2DataBase.put(fullId, formdata.get('file'));
+    await R2DataBase.put(fullId, formdata.get('file'), {
+        httpMetadata: { contentType: metadata.FileType },
+    });
 
     // 更新metadata
     metadata.Channel = "CloudflareR2";
@@ -383,7 +386,7 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
             Bucket: bucketName,
             Key: s3FileName,
             Body: uint8Array, // 直接使用 Blob
-            ContentType: file.type
+            ContentType: metadata.FileType
         };
 
         // 执行上传
@@ -401,8 +404,6 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         }
         metadata.S3Endpoint = endpoint;
         metadata.S3PathStyle = pathStyle;
-        metadata.S3AccessKeyId = accessKeyId;
-        metadata.S3SecretAccessKey = secretAccessKey;
         metadata.S3Region = region || "auto";
         metadata.S3BucketName = bucketName;
         metadata.S3FileKey = s3FileName;
@@ -556,7 +557,6 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
 
             metadata.TgFileId = id;
             metadata.TgChatId = tgChatId;
-            metadata.TgBotToken = tgBotToken;
             // 保存代理域名配置
             if (tgProxyUrl) {
                 metadata.TgProxyUrl = tgProxyUrl;
@@ -675,7 +675,6 @@ async function uploadFileToDiscord(context, fullId, metadata, returnLink) {
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
         metadata.DiscordMessageId = fileInfo.message_id;
         metadata.DiscordChannelId = discordChannel.channelId;
-        metadata.DiscordBotToken = discordChannel.botToken;
         // 注意：不存储 DiscordAttachmentUrl，因为 Discord 附件 URL 会在约24小时后过期
         // 读取时会通过 API 获取新的 URL
 
@@ -789,7 +788,6 @@ async function uploadFileToHuggingFace(context, fullId, metadata, returnLink) {
         metadata.ChannelName = hfChannel.name || "HuggingFace_env";
         metadata.HfRepo = hfChannel.repo;
         metadata.HfFilePath = hfFilePath;
-        metadata.HfToken = hfChannel.token;
         metadata.HfIsPrivate = hfChannel.isPrivate || false;
         metadata.HfFileUrl = result.fileUrl;
 
@@ -874,7 +872,7 @@ async function uploadFileToWebDAV(context, fullId, metadata, returnLink) {
 
     try {
         const webdavAPI = new WebDAVAPI(webdavChannel);
-        await webdavAPI.putFile(fullId, file, file.type || metadata.FileType || 'application/octet-stream');
+        await webdavAPI.putFile(fullId, file, metadata.FileType);
 
         metadata.Channel = "WebDAV";
         metadata.ChannelName = webdavChannel.name || "WebDAV_env";

@@ -5,6 +5,7 @@ import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
 import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
+import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -106,6 +107,8 @@ export async function onRequest(context) {
             });
         }
 
+        fileData.metadata = await hydrateFileCredentials(env, fileData.metadata);
+
         // 执行文件迁移
         const metadata = { ...fileData.metadata };
 
@@ -136,7 +139,7 @@ export async function onRequest(context) {
                 const s3ServerDomain = metadata.S3Endpoint.replace(/https?:\/\//, "");
                 metadata.S3Location = `https://${metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
             } else {
-                // do nothing
+                throw new Error(error || 'S3 Rename Failed');
             }
         }
 

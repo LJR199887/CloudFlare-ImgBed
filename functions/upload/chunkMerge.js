@@ -3,6 +3,7 @@ import { createResponse, getUploadIp, getIPAddress, selectConsistentChannel, bui
 import { retryFailedChunks, cleanupFailedMultipartUploads, checkChunkUploadStatuses, cleanupChunkData, cleanupUploadSession } from './chunkUpload';
 import { S3Client, CompleteMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
+import { resolveFileType } from '../utils/mimeTypes.js';
 
 // 处理分块合并
 export async function handleChunkMerge(context) {
@@ -32,6 +33,7 @@ export async function handleChunkMerge(context) {
         }
 
         const sessionInfo = JSON.parse(sessionData);
+        originalFileType = resolveFileType(originalFileName, originalFileType || sessionInfo.originalFileType);
 
         // 验证会话信息
         if (sessionInfo.originalFileName !== originalFileName ||
@@ -386,8 +388,6 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
         }
         metadata.S3Endpoint = endpoint;
         metadata.S3PathStyle = pathStyle;
-        metadata.S3AccessKeyId = accessKeyId;
-        metadata.S3SecretAccessKey = secretAccessKey;
         metadata.S3Region = region || "auto";
         metadata.S3BucketName = bucketName;
         metadata.S3FileKey = finalFileId;
@@ -464,7 +464,6 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
         metadata.TgChatId = tgChatId;
-        metadata.TgBotToken = tgBotToken;
         metadata.TgProxyUrl = tgChannel.proxyUrl || '';
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
@@ -544,7 +543,6 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
         metadata.Channel = "Discord";
         metadata.ChannelName = discordChannel.name;
         metadata.DiscordChannelId = channelId;
-        metadata.DiscordBotToken = botToken;
         metadata.DiscordProxyUrl = discordChannel.proxyUrl || '';
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;

@@ -11,6 +11,7 @@
  */
 
 import { HuggingFaceAPI } from '../../utils/storage/huggingfaceAPI.js';
+import { resolveFileType } from '../../utils/mimeTypes.js';
 import { fetchUploadConfig } from '../../utils/sysConfig.js';
 import { userAuthCheck, UnauthorizedResponse } from '../../utils/auth/userAuth.js';
 import { buildUniqueFileId, getUploadIp, isBlockedUploadIp, createResponse } from '../uploadTools.js';
@@ -39,9 +40,9 @@ export async function onRequestPost(context) {
         const body = await request.json();
         const { fileSize, fileName, fileType, sha256, fileSample, channelName, uploadNameType, uploadFolder } = body;
 
-        if (!fileSize || !fileName || !fileType || !sha256 || !fileSample) {
+        if (!fileSize || !fileName || !sha256 || !fileSample) {
             return createResponse(JSON.stringify({
-                error: 'Missing required fields: fileSize, fileName, fileType, sha256, fileSample'
+                error: 'Missing required fields: fileSize, fileName, sha256, fileSample'
             }), {
                 status: 400,
                 headers: { 'Content-Type': 'application/json' }
@@ -86,7 +87,7 @@ export async function onRequestPost(context) {
         }
 
         // 使用统一的文件命名函数生成文件ID
-        const fullId = await buildUniqueFileId(context, fileName, fileType || 'application/octet-stream');
+        const fullId = await buildUniqueFileId(context, fileName, resolveFileType(fileName, fileType));
 
         // 生成唯一标识符前缀（UUID格式），加在文件名前面
         const uniquePrefix = crypto.randomUUID();

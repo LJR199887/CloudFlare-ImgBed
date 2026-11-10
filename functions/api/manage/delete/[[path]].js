@@ -6,6 +6,7 @@ import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
 import { WebDAVAPI } from '../../../utils/storage/webdavAPI.js';
 import { resolveWebDAVConfig } from '../../../utils/webdavConfig.js';
+import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -136,6 +137,7 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
             return true;
         }
+        img.metadata = await hydrateFileCredentials(env, img.metadata);
 
         // 如果是R2渠道的图片，需要删除R2中对应的图片
         if (img.metadata?.Channel === 'CloudflareR2') {
@@ -145,22 +147,22 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
 
         // S3 渠道的图片，需要删除S3中对应的图片
         if (img.metadata?.Channel === 'S3') {
-            await deleteS3File(img);
+            if (!await deleteS3File(img)) throw new Error('S3 deletion failed');
         }
 
         // Discord 渠道的图片，需要删除 Discord 中对应的消息
         if (img.metadata?.Channel === 'Discord') {
-            await deleteDiscordFile(img);
+            if (!await deleteDiscordFile(img)) throw new Error('Discord deletion failed');
         }
 
         // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
         if (img.metadata?.Channel === 'HuggingFace') {
-            await deleteHuggingFaceFile(img);
+            if (!await deleteHuggingFaceFile(img)) throw new Error('HuggingFace deletion failed');
         }
 
         // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
         if (img.metadata?.Channel === 'WebDAV') {
-            await deleteWebDAVFile(env, img);
+            if (!await deleteWebDAVFile(env, img)) throw new Error('WebDAV deletion failed');
         }
 
         // 删除数据库中的记录

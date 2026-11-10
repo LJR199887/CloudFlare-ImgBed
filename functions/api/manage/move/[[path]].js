@@ -5,6 +5,7 @@ import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
 import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
+import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
 
 export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
@@ -131,6 +132,8 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
 
         // 读取图片信息
         const img = await db.getWithMetadata(fileId);
+        if (!img?.metadata) throw new Error('File not found');
+        img.metadata = await hydrateFileCredentials(env, img.metadata);
 
         // 如果是R2渠道的图片，需要移动R2中对应的图片
         if (img.metadata?.Channel === 'CloudflareR2') {
@@ -159,7 +162,7 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
                 const s3ServerDomain = img.metadata.S3Endpoint.replace(/https?:\/\//, "");
                 img.metadata.S3Location = `https://${img.metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
             } else {
-                // do nothing
+                throw new Error(error || 'S3 Move Failed');
             }
         }
 

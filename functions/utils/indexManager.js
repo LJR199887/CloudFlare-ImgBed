@@ -38,6 +38,7 @@
  */
 
 import { getDatabase, checkDatabaseConfig } from './databaseAdapter.js';
+import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
 
 const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
@@ -804,7 +805,7 @@ export async function rebuildIndex(context, progressCallback = null) {
                 // 构建文件索引项
                 const fileItem = {
                     id: item.name,
-                    metadata: item.metadata || {}
+                    metadata: stripSensitiveMetadata(item.metadata || {})
                 };
 
                 newIndex.files.push(fileItem);
@@ -1311,13 +1312,21 @@ async function recordOperation(context, type, data) {
     const operation = {
         type,
         timestamp: Date.now(),
-        data
+        data: sanitizeOperationData(data)
     };
     
     const operationKey = OPERATION_KEY_PREFIX + operationId;
     await db.put(operationKey, JSON.stringify(operation));
 
     return operationId;
+}
+
+function sanitizeOperationData(value) {
+    if (Array.isArray(value)) return value.map(sanitizeOperationData);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+        key, key === 'metadata' ? stripSensitiveMetadata(item) : sanitizeOperationData(item)
+    ]));
 }
 
 /**
@@ -1890,7 +1899,9 @@ async function saveChunkedIndex(context, index) {
     const chunkSize = getIndexChunkSize(env);
     
     try {
-        const files = index.files || [];
+        const files = (index.files || []).map(file => ({
+            ...file, metadata: stripSensitiveMetadata(file.metadata)
+        }));
         const chunks = [];
         
         // 将文件数组分块

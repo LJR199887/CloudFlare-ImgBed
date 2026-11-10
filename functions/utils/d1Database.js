@@ -1,6 +1,7 @@
 /**
  * D1 数据库操作工具类
  */
+import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
 
 class D1Database {
     constructor(db) {
@@ -16,7 +17,7 @@ class D1Database {
 D1Database.prototype.putFile = function(fileId, value, options) {
     value = value || '';
     options = options || {};
-    var metadata = options.metadata || {};
+    var metadata = stripSensitiveMetadata(options.metadata || {});
     
     // 从metadata中提取字段用于索引
     var extractedFields = this.extractMetadataFields(metadata);
