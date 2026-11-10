@@ -5,6 +5,7 @@
 
 import { D1Database } from './d1Database.js';
 import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
+import { assertLegacyWriteSafe } from './metadata/writeSafety.js';
 
 /**
  * 创建数据库适配器
@@ -15,10 +16,10 @@ export function createDatabaseAdapter(env) {
     // 检查是否配置了数据库
     if (env.img_url && typeof env.img_url.get === 'function') {
         // 使用KV存储
-        return new KVAdapter(env.img_url);
+        return new KVAdapter(env.img_url, env);
     } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
         // 使用D1数据库
-        return new D1Database(env.img_d1);
+        return new D1Database(env.img_d1, env);
     } else {
         console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
         return null;
@@ -30,14 +31,16 @@ export function createDatabaseAdapter(env) {
  * 保持与原有KV接口的兼容性
  */
 class KVAdapter {
-    constructor(kv) {
+    constructor(kv, env) {
         this.kv = kv;
+        this.env = env;
     }
 
     // 直接代理到KV的方法
     async put(key, value, options) {
         options = options || {};
         if (options.metadata) {
+            await assertLegacyWriteSafe(this, this.env, key);
             options = { ...options, metadata: stripSensitiveMetadata(options.metadata) };
         }
         return await this.kv.put(key, value, options);

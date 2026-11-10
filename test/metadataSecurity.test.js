@@ -40,7 +40,7 @@ describe('file metadata credential isolation', () => {
 
     it('also strips file metadata and the Telegram token index column in D1', async () => {
         let bound;
-        const d1 = { prepare() { return { bind(...values) { bound = values; return { async run() {} }; } }; } };
+        const d1 = { prepare() { return { bind(...values) { bound = values; return { async first() { return null; }, async run() {} }; } }; } };
         const db = createDatabaseAdapter({ img_d1: d1 });
         await db.put('photo.jpg', '', { metadata: {
             Channel: 'TelegramNew', TgFileId: 'file', TgBotToken: 'secret', TimeStamp: 1,

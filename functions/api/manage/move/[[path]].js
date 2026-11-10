@@ -6,6 +6,7 @@ import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
 import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
 import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
+import { assertLegacyWriteSafe } from '../../../utils/metadata/writeSafety.js';
 
 export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
@@ -133,6 +134,7 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
         // 读取图片信息
         const img = await db.getWithMetadata(fileId);
         if (!img?.metadata) throw new Error('File not found');
+        await assertLegacyWriteSafe(db, env, fileId);
         img.metadata = await hydrateFileCredentials(env, img.metadata);
 
         // 如果是R2渠道的图片，需要移动R2中对应的图片

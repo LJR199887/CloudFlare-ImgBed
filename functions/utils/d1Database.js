@@ -2,10 +2,12 @@
  * D1 数据库操作工具类
  */
 import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
+import { assertLegacyWriteSafe } from './metadata/writeSafety.js';
 
 class D1Database {
-    constructor(db) {
+    constructor(db, env = {}) {
         this.db = db;
+        this.env = env;
     }
 }
 
@@ -14,7 +16,8 @@ class D1Database {
 /**
  * 保存文件记录 (替代 KV.put)
  */
-D1Database.prototype.putFile = function(fileId, value, options) {
+D1Database.prototype.putFile = async function(fileId, value, options) {
+    await assertLegacyWriteSafe(this, this.env, fileId);
     value = value || '';
     options = options || {};
     var metadata = stripSensitiveMetadata(options.metadata || {});

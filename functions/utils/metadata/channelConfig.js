@@ -7,6 +7,7 @@ import { getUploadConfig } from '../../api/manage/sysConfig/upload.js';
 // 旧 metadata 中可能保存过渠道身份字段，按强匹配到弱匹配依次尝试
 const CHANNEL_IDENTITY_RULES = {
   telegram: [
+    [['botId', 'TgBotId'], ['chatId', 'TgChatId']],
     [
       ['botToken', 'TgBotToken'],
       ['chatId', 'TgChatId'],
@@ -33,6 +34,7 @@ const CHANNEL_IDENTITY_RULES = {
       ['botToken', 'DiscordBotToken'],
       ['channelId', 'DiscordChannelId'],
     ],
+    [['channelId', 'DiscordChannelId']],
   ],
   huggingface: [
     [
@@ -83,12 +85,17 @@ export async function loadChannelConfig(db, env, logContext = 'channel config') 
 // 根据 ChannelName、历史身份字段和旧 Telegram 默认名查找匹配渠道
 export function findConfiguredChannel(uploadConfig, groupName, metadata = {}) {
   if (!uploadConfig) return null;
+  if (groupName === 'telegram' && !metadata.TgBotId && metadata.TgBotToken) {
+    metadata = { ...metadata, TgBotId: String(metadata.TgBotToken).match(/^(\d+):/)?.[1] };
+  }
 
-  const channels = uploadConfig[groupName]?.channels || [];
+  const channels = (uploadConfig[groupName]?.channels || []).map(channel => groupName === 'telegram'
+    ? { ...channel, botId: String(channel.botToken || '').match(/^(\d+):/)?.[1] || '' }
+    : channel);
   // 优先使用当前版本写入的渠道名，避免多渠道配置相似时误匹配
   if (metadata?.ChannelName) {
     const namedChannel = channels.find((channel) => channel.name === metadata.ChannelName);
-    if (namedChannel) return namedChannel;
+    if (namedChannel && channelIdentityMatches(namedChannel, groupName, metadata)) return namedChannel;
   }
 
   const identityChannel = findChannelByPersistedIdentity(channels, groupName, metadata);
@@ -102,7 +109,7 @@ export function findConfiguredChannel(uploadConfig, groupName, metadata = {}) {
 // 兼容旧版默认 Telegram 环境变量渠道
 function findLegacyTelegramEnvChannel(channels, groupName, metadata = {}) {
   // 兼容未写入 ChannelName 的旧 Telegram 记录
-  if (groupName === 'telegram' && (metadata.Channel === 'Telegram' || metadata.Channel === 'TelegramNew')) {
+  if (groupName === 'telegram' && !metadata.ChannelName && !metadata.TgBotId && !metadata.TgBotToken && !metadata.TgChatId) {
     return channels.find((channel) => channel.name === 'Telegram_env') || null;
   }
 
@@ -116,13 +123,31 @@ function findChannelByPersistedIdentity(channels, groupName, metadata = {}) {
   for (const fields of ruleGroups) {
     if (!hasAllMetadataFields(metadata, fields)) continue;
 
-    const matches = channels.filter((channel) => fieldsMatch(channel, metadata, fields));
+    const matches = channels.filter((channel) => fieldsMatch(channel, metadata, fields) && channelIdentityMatches(channel, groupName, metadata));
     if (matches.length === 1) {
       return matches[0];
     }
   }
 
   return null;
+}
+
+// A display name is not a storage identity. Never rebind an old file to another
+// bucket, repository, chat or WebDAV root when a channel is edited or reused.
+function channelIdentityMatches(channel, group, metadata) {
+  const identities = {
+    s3: [['endpoint', 'S3Endpoint'], ['bucketName', 'S3BucketName']],
+    telegram: [['botId', 'TgBotId'], ['chatId', 'TgChatId']],
+    discord: [['channelId', 'DiscordChannelId']],
+    huggingface: [['repo', 'HfRepo']],
+    webdav: [['baseUrl', 'WebDAVBaseUrl']],
+  }[group] || [];
+  const historical = { ...metadata };
+  if (group === 'telegram' && !historical.TgBotId && historical.TgBotToken) {
+    historical.TgBotId = String(historical.TgBotToken).match(/^(\d+):/)?.[1];
+  }
+  return identities.every(([field, key]) => !hasIdentityValue(historical[key]) ||
+    normalizeIdentityValue(channel[field] ?? '', field) === normalizeIdentityValue(historical[key], key));
 }
 
 // 确保某组匹配规则所需的 metadata 字段都存在
@@ -173,24 +198,21 @@ function normalizeBooleanIdentityValue(value) {
   return String(value).trim().toLowerCase() === 'true' ? 'true' : 'false';
 }
 
-// 规范化 URL 身份字段，忽略协议、userinfo、查询、hash 和尾部斜杠差异
+// Preserve protocol and query (they can identify a different storage target).
+// Only userinfo, fragments and trailing slashes are irrelevant to matching.
 function normalizeUrlIdentityValue(value) {
   try {
     const url = new URL(ensureUrlProtocol(value));
     url.username = '';
     url.password = '';
     url.hash = '';
-    url.search = '';
     if (url.pathname.endsWith('/')) {
       url.pathname = url.pathname.replace(/\/+$/, '/');
     }
-    return url.toString()
-      .replace(/^https?:\/\//i, '')
-      .replace(/\/+$/, '');
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString();
   } catch {
-    return value
-      .replace(/^https?:\/\//i, '')
-      .replace(/\/+$/, '');
+    return value.replace(/\/+$/, '');
   }
 }
 

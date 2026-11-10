@@ -557,6 +557,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
 
             metadata.TgFileId = id;
             metadata.TgChatId = tgChatId;
+            if (/^\d+:/.test(tgBotToken)) metadata.TgBotId = String(tgBotToken).split(':')[0];
             // 保存代理域名配置
             if (tgProxyUrl) {
                 metadata.TgProxyUrl = tgProxyUrl;

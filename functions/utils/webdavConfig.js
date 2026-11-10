@@ -1,9 +1,9 @@
 import { getUploadConfig } from '../api/manage/sysConfig/upload.js';
 import { getDatabase } from './databaseAdapter.js';
 import { normalizeWebDAVHeaders } from './storage/webdavAPI.js';
+import { findConfiguredChannel } from './metadata/channelConfig.js';
 
 export async function resolveWebDAVConfig(env, metadata = {}) {
-    const channelName = metadata.ChannelName;
     const metadataBaseUrl = metadata.WebDAVBaseUrl;
 
     try {
@@ -11,8 +11,7 @@ export async function resolveWebDAVConfig(env, metadata = {}) {
         const uploadConfig = await getUploadConfig(db, env);
         const channels = uploadConfig.webdav?.channels || [];
 
-        const channel = channels.find((item) => item.name === channelName)
-            || channels.find((item) => getWebDAVBaseUrl(item) === metadataBaseUrl);
+        const channel = findConfiguredChannel({ webdav: { channels } }, 'webdav', metadata);
 
         if (channel) {
             return normalizeWebDAVConfig(channel);

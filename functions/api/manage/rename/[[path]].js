@@ -6,6 +6,7 @@ import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
 import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
 import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
+import { assertLegacyWriteSafe } from '../../../utils/metadata/writeSafety.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -107,6 +108,7 @@ export async function onRequest(context) {
             });
         }
 
+        await assertLegacyWriteSafe(db, env, fileId);
         fileData.metadata = await hydrateFileCredentials(env, fileData.metadata);
 
         // 执行文件迁移

@@ -78,6 +78,9 @@ export function stripSensitiveMetadataInPlace(metadata = {}) {
   }
 
   // 凭据字段不随管理端接口响应返回，也不重新写回 metadata
+  if (!metadata.TgBotId && /^\d+:/.test(metadata.TgBotToken || '')) {
+    metadata.TgBotId = String(metadata.TgBotToken).split(':')[0];
+  }
   for (const key of SENSITIVE_METADATA_KEYS) {
     delete metadata[key];
   }
