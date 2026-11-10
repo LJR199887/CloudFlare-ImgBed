@@ -14,6 +14,7 @@ import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { resolveFileType } from '../utils/mimeTypes.js';
+import { getWebDAVAccountId } from '../utils/metadata/webdavIdentity.js';
 
 
 export async function onRequest(context) {  // Contents of context object
@@ -878,6 +879,7 @@ async function uploadFileToWebDAV(context, fullId, metadata, returnLink) {
         metadata.Channel = "WebDAV";
         metadata.ChannelName = webdavChannel.name || "WebDAV_env";
         metadata.WebDAVBaseUrl = baseUrl;
+        metadata.WebDAVAccountId = await getWebDAVAccountId(webdavChannel);
         metadata.WebDAVFilePath = fullId;
         if (webdavChannel.publicUrl) {
             metadata.WebDAVPublicBaseUrl = webdavChannel.publicUrl;

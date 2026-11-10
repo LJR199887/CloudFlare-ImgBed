@@ -2,6 +2,7 @@ import { getUploadConfig } from '../api/manage/sysConfig/upload.js';
 import { getDatabase } from './databaseAdapter.js';
 import { normalizeWebDAVHeaders } from './storage/webdavAPI.js';
 import { findConfiguredChannel } from './metadata/channelConfig.js';
+import { getWebDAVAccountId } from './metadata/webdavIdentity.js';
 
 export async function resolveWebDAVConfig(env, metadata = {}) {
     const metadataBaseUrl = metadata.WebDAVBaseUrl;
@@ -11,7 +12,7 @@ export async function resolveWebDAVConfig(env, metadata = {}) {
         const uploadConfig = await getUploadConfig(db, env);
         const channels = uploadConfig.webdav?.channels || [];
 
-        const channel = findConfiguredChannel({ webdav: { channels } }, 'webdav', metadata);
+        const channel = await findConfiguredChannel({ webdav: { channels } }, 'webdav', metadata);
 
         if (channel) {
             return normalizeWebDAVConfig(channel);
@@ -20,7 +21,7 @@ export async function resolveWebDAVConfig(env, metadata = {}) {
         console.error('Failed to resolve WebDAV channel config:', error);
     }
 
-    return normalizeWebDAVConfig({
+    const fallback = normalizeWebDAVConfig({
         baseUrl: metadataBaseUrl,
         username: metadata.WebDAVUsername || '',
         password: metadata.WebDAVPassword || '',
@@ -28,6 +29,11 @@ export async function resolveWebDAVConfig(env, metadata = {}) {
         createDirectory: metadata.WebDAVCreateDirectory !== false,
         publicUrl: metadata.WebDAVPublicBaseUrl || '',
     });
+    // A credential-free record bound to a private account must not silently
+    // fall back to anonymous access when its channel is missing or replaced.
+    if (fallback && metadata.WebDAVAccountId &&
+        await getWebDAVAccountId(fallback) !== metadata.WebDAVAccountId) return null;
+    return fallback;
 }
 
 function normalizeWebDAVConfig(config = {}) {

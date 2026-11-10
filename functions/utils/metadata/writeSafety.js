@@ -11,7 +11,7 @@ export async function assertLegacyWriteSafe(db, env, fileId) {
     const group = GROUPS[metadata?.Channel];
     if (!group || !hasLegacyCredentials(metadata, group)) return;
     const config = await loadChannelConfig(db, env, 'legacy metadata update');
-    const channel = findConfiguredChannel(config, group, metadata);
+    const channel = await findConfiguredChannel(config, group, metadata);
     if (!channel || !hasReplacementCredentials(channel, group, metadata)) {
         throw new Error('Cannot update legacy file: restore its matching storage channel configuration before removing metadata credentials.');
     }

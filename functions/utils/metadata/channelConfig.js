@@ -3,6 +3,7 @@
  * 负责从当前上传配置中定位历史文件 metadata 对应的渠道配置
  */
 import { getUploadConfig } from '../../api/manage/sysConfig/upload.js';
+import { getWebDAVAccountId, getMetadataWebDAVAccountId } from './webdavIdentity.js';
 
 // 旧 metadata 中可能保存过渠道身份字段，按强匹配到弱匹配依次尝试
 const CHANNEL_IDENTITY_RULES = {
@@ -83,15 +84,22 @@ export async function loadChannelConfig(db, env, logContext = 'channel config') 
 }
 
 // 根据 ChannelName、历史身份字段和旧 Telegram 默认名查找匹配渠道
-export function findConfiguredChannel(uploadConfig, groupName, metadata = {}) {
+export async function findConfiguredChannel(uploadConfig, groupName, metadata = {}) {
   if (!uploadConfig) return null;
   if (groupName === 'telegram' && !metadata.TgBotId && metadata.TgBotToken) {
     metadata = { ...metadata, TgBotId: String(metadata.TgBotToken).match(/^(\d+):/)?.[1] };
   }
 
-  const channels = (uploadConfig[groupName]?.channels || []).map(channel => groupName === 'telegram'
+  let channels = (uploadConfig[groupName]?.channels || []).map(channel => groupName === 'telegram'
     ? { ...channel, botId: String(channel.botToken || '').match(/^(\d+):/)?.[1] || '' }
     : channel);
+  if (groupName === 'webdav') {
+    const expectedAccount = await getMetadataWebDAVAccountId(metadata);
+    if (expectedAccount) {
+      const accounts = await Promise.all(channels.map(channel => getWebDAVAccountId(channel)));
+      channels = channels.filter((channel, index) => accounts[index] === expectedAccount);
+    }
+  }
   // 优先使用当前版本写入的渠道名，避免多渠道配置相似时误匹配
   if (metadata?.ChannelName) {
     const namedChannel = channels.find((channel) => channel.name === metadata.ChannelName);

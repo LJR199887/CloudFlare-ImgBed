@@ -13,7 +13,7 @@ export async function hydrateFileCredentials(env, metadata = {}) {
 
     const db = getDatabase(env);
     const config = await loadChannelConfig(db, env, 'file credentials');
-    const channel = findConfiguredChannel(config, group, metadata);
+    const channel = await findConfiguredChannel(config, group, metadata);
     if (!channel) return { ...metadata };
 
     const result = { ...metadata };
@@ -22,8 +22,9 @@ export async function hydrateFileCredentials(env, metadata = {}) {
         S3Region: metadata.S3Region || channel.region || 'auto',
         S3BucketName: metadata.S3BucketName || channel.bucketName,
         S3PathStyle: metadata.S3PathStyle ?? channel.pathStyle ?? false,
-        S3AccessKeyId: channel.accessKeyId || metadata.S3AccessKeyId,
-        S3SecretAccessKey: channel.secretAccessKey || metadata.S3SecretAccessKey,
+        // An access key ID and secret are one credential, never mix versions.
+        S3AccessKeyId: channel.accessKeyId && channel.secretAccessKey ? channel.accessKeyId : metadata.S3AccessKeyId,
+        S3SecretAccessKey: channel.accessKeyId && channel.secretAccessKey ? channel.secretAccessKey : metadata.S3SecretAccessKey,
     });
     if (group === 'telegram') Object.assign(result, {
         TgBotToken: channel.botToken || metadata.TgBotToken,

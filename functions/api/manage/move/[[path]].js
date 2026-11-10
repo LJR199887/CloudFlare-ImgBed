@@ -134,6 +134,11 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
         // 读取图片信息
         const img = await db.getWithMetadata(fileId);
         if (!img?.metadata) throw new Error('File not found');
+        if (fileId === newFileId) return true;
+        // Refuse collisions before copying/deleting any storage object. In
+        // particular, the destination may have protected legacy credentials.
+        const destination = await db.getWithMetadata(newFileId);
+        if (destination && destination.value != null) throw new Error('Target file already exists');
         await assertLegacyWriteSafe(db, env, fileId);
         img.metadata = await hydrateFileCredentials(env, img.metadata);
 

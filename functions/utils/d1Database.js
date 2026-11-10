@@ -1,7 +1,7 @@
 /**
  * D1 数据库操作工具类
  */
-import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
+import { prepareMetadataForStorage } from './metadata/webdavIdentity.js';
 import { assertLegacyWriteSafe } from './metadata/writeSafety.js';
 
 class D1Database {
@@ -20,7 +20,7 @@ D1Database.prototype.putFile = async function(fileId, value, options) {
     await assertLegacyWriteSafe(this, this.env, fileId);
     value = value || '';
     options = options || {};
-    var metadata = stripSensitiveMetadata(options.metadata || {});
+    var metadata = await prepareMetadataForStorage(options.metadata || {});
     
     // 从metadata中提取字段用于索引
     var extractedFields = this.extractMetadataFields(metadata);

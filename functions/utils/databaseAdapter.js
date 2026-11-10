@@ -4,7 +4,7 @@
  */
 
 import { D1Database } from './d1Database.js';
-import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
+import { prepareMetadataForStorage } from './metadata/webdavIdentity.js';
 import { assertLegacyWriteSafe } from './metadata/writeSafety.js';
 
 /**
@@ -41,7 +41,7 @@ class KVAdapter {
         options = options || {};
         if (options.metadata) {
             await assertLegacyWriteSafe(this, this.env, key);
-            options = { ...options, metadata: stripSensitiveMetadata(options.metadata) };
+            options = { ...options, metadata: await prepareMetadataForStorage(options.metadata) };
         }
         return await this.kv.put(key, value, options);
     }
