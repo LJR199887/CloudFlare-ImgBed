@@ -17,7 +17,7 @@ class D1Database {
  * 保存文件记录 (替代 KV.put)
  */
 D1Database.prototype.putFile = async function(fileId, value, options) {
-    await assertLegacyWriteSafe(this, this.env, fileId);
+    await assertLegacyWriteSafe(this, this.env, fileId, options?.metadata);
     value = value || '';
     options = options || {};
     var metadata = await prepareMetadataForStorage(options.metadata || {});

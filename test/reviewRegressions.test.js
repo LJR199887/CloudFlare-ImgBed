@@ -146,6 +146,9 @@ describe('second-review regressions', () => {
         const db = new D1Database({ prepare() { return { bind(...args) { return {
             async first() { return null; }, async run() { bound = args; },
         }; } }; } });
+        db.get = async () => JSON.stringify({ webdav: { channels: [{
+            baseUrl: 'https://dav.example/root', username: 'alice', password: 'password',
+        }] } });
         await db.putFile('file.png', '', { metadata: {
             Channel: 'WebDAV', WebDAVBaseUrl: 'https://dav.example/root', WebDAVUsername: 'alice', WebDAVPassword: 'password',
         } });

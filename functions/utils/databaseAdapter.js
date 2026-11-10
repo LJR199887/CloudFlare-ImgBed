@@ -40,7 +40,7 @@ class KVAdapter {
     async put(key, value, options) {
         options = options || {};
         if (options.metadata) {
-            await assertLegacyWriteSafe(this, this.env, key);
+            await assertLegacyWriteSafe(this, this.env, key, options.metadata);
             options = { ...options, metadata: await prepareMetadataForStorage(options.metadata) };
         }
         return await this.kv.put(key, value, options);

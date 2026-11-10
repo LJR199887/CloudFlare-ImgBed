@@ -1,19 +1,31 @@
 import { findConfiguredChannel, loadChannelConfig } from './channelConfig.js';
+import { prepareMetadataForStorage } from './webdavIdentity.js';
 
 const GROUPS = { S3: 's3', Telegram: 'telegram', TelegramNew: 'telegram', Discord: 'discord', HuggingFace: 'huggingface', WebDAV: 'webdav' };
 
-// Do not erase the only remaining credentials during an unrelated metadata edit.
-// Restore a matching channel first; this also guards payloads without old secrets.
-export async function assertLegacyWriteSafe(db, env, fileId) {
+// Do not erase the only remaining credentials during an edit or backup restore.
+// Check both sides: imports may target an empty database, while updates may omit
+// secrets that are still present in the existing record.
+export async function assertLegacyWriteSafe(db, env, fileId, incomingMetadata) {
     if (fileId.startsWith('manage@') || fileId.startsWith('chunk_')) return;
     const old = await db.getWithMetadata(fileId);
-    const metadata = old?.metadata;
-    const group = GROUPS[metadata?.Channel];
-    if (!group || !hasLegacyCredentials(metadata, group)) return;
+    const candidates = [old?.metadata, incomingMetadata].filter(metadata => {
+        const group = GROUPS[metadata?.Channel];
+        return group && hasLegacyCredentials(metadata, group);
+    });
+    if (!candidates.length) return;
     const config = await loadChannelConfig(db, env, 'legacy metadata update');
-    const channel = await findConfiguredChannel(config, group, metadata);
-    if (!channel || !hasReplacementCredentials(channel, group, metadata)) {
-        throw new Error('Cannot update legacy file: restore its matching storage channel configuration before removing metadata credentials.');
+    for (const metadata of candidates) {
+        const group = GROUPS[metadata.Channel];
+        const channel = await findConfiguredChannel(config, group, metadata);
+        // A secret can disambiguate otherwise identical channels. Make sure the
+        // persisted, credential-free record can still resolve a complete channel.
+        const persisted = await prepareMetadataForStorage(metadata);
+        const persistedChannel = await findConfiguredChannel(config, group, persisted);
+        if (!channel || !hasReplacementCredentials(channel, group, metadata) ||
+            !persistedChannel || !hasReplacementCredentials(persistedChannel, group, metadata)) {
+            throw new Error('Cannot write legacy file: restore its matching storage channel configuration before removing metadata credentials, then retry the file operation.');
+        }
     }
 }
 

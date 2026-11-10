@@ -176,6 +176,14 @@ export class DiscordAPI {
                 return true;
             }
 
+            // Only Discord's explicit Unknown Message is an idempotent success.
+            // Generic 404s, inaccessible channels and permission failures must
+            // retain the local record so deletion can be retried safely.
+            if (response.status === 404) {
+                const errorData = await response.json().catch(() => null);
+                if (errorData?.code === 10008) return true;
+            }
+
             console.error('Discord deleteMessage error:', response.status, response.statusText);
             return false;
         } catch (error) {

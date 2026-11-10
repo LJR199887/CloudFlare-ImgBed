@@ -22,7 +22,11 @@ function memoryKV(initial = {}) {
 
 describe('file metadata credential isolation', () => {
     it('removes secret fields without mutating the upload metadata', async () => {
-        const kv = memoryKV();
+        const kv = memoryKV({
+            'manage@sysConfig@upload': { value: JSON.stringify({
+                s3: { channels: [{ name: 'primary', endpoint: 'https://s3.example', bucketName: 'bucket', accessKeyId: 'access', secretAccessKey: 'secret' }] },
+            }) },
+        });
         const db = createDatabaseAdapter({ img_url: kv });
         const metadata = {
             Channel: 'S3', ChannelName: 'primary', S3FileKey: 'photo.jpg',
@@ -41,9 +45,9 @@ describe('file metadata credential isolation', () => {
     it('also strips file metadata and the Telegram token index column in D1', async () => {
         let bound;
         const d1 = { prepare() { return { bind(...values) { bound = values; return { async first() { return null; }, async run() {} }; } }; } };
-        const db = createDatabaseAdapter({ img_d1: d1 });
+        const db = createDatabaseAdapter({ img_d1: d1, TG_BOT_TOKEN: '123:secret', TG_CHAT_ID: 'chat' });
         await db.put('photo.jpg', '', { metadata: {
-            Channel: 'TelegramNew', TgFileId: 'file', TgBotToken: 'secret', TimeStamp: 1,
+            Channel: 'TelegramNew', TgFileId: 'file', TgBotToken: '123:secret', TgChatId: 'chat', TimeStamp: 1,
         } });
         assert.equal(JSON.parse(bound[2]).TgBotToken, undefined);
         assert.equal(bound[16], null);
