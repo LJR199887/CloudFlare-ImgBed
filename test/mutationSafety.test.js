@@ -40,7 +40,7 @@ describe('rename response credential isolation', () => {
                 ...noCache, getDatabase: createDatabaseAdapter, hydrateFileCredentials, assertLegacyWriteSafe,
                 prepareMetadataForStorage, resolveWebDAVConfig, sanitizeUploadFolder: v => v,
                 S3Client: class { async send() {} }, CopyObjectCommand: class {}, DeleteObjectCommand: class {},
-                WebDAVAPI: class { async moveFile() {} }, moveFileInIndex: async () => {},
+                WebDAVAPI: class { async copyFile() {} async deleteFile() {} }, moveFileInIndex: async () => {},
             });
             const response = await route.onRequest({ env: f.env, params: { path: 'old.png' }, waitUntil() {}, request: new Request('https://img.example/rename/old.png', {
                 method: 'POST', body: JSON.stringify({ newFileId: 'new.png' }),

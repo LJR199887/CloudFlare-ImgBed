@@ -15,6 +15,7 @@ import { SqliteD1 } from './sqliteD1.js';
 import { LocalR2Storage } from './r2Storage.js';
 import { startCleanupScheduler } from './cleanupScheduler.js';
 import { fetchPublicHop } from './publicDownload.js';
+import { createDecodedFetch } from './decodedFetch.js';
 
 const NativeResponse = globalThis.Response;
 
@@ -37,7 +38,7 @@ if (typeof globalThis.caches === 'undefined') {
 // 这样 url.origin 保持为外部 origin，确保 Referer 匹配、返回链接、重定向等功能正常
 
 const selfOrigins = new Set();
-const originalFetch = globalThis.fetch;
+const originalFetch = createDecodedFetch(globalThis.fetch);
 
 globalThis.fetch = async function(input, init) {
     try {

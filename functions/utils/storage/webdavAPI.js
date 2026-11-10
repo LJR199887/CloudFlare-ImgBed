@@ -107,6 +107,29 @@ export class WebDAVAPI {
         return response;
     }
 
+    // Application-level moves use COPY + DB commit + DELETE. MOVE would
+    // destroy the source before a failed database write can be recovered.
+    async copyFile(oldPath, newPath, overwrite = false) {
+        const source = this.buildObjectUrl(oldPath);
+        await this.ensureDirectory(newPath);
+        const response = await fetch(source, {
+            method: 'COPY',
+            headers: this.getRequestHeaders({
+                Destination: this.buildObjectUrl(newPath),
+                Overwrite: overwrite ? 'T' : 'F',
+                Depth: '0',
+            }),
+            redirect: 'manual',
+        });
+        // 207 may contain per-resource failures; never treat it as success.
+        if (![200, 201, 204].includes(response.status)) {
+            const detail = await safeReadResponseText(response);
+            throw new Error(`WebDAV COPY failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+        }
+        await response.body?.cancel();
+        return true;
+    }
+
     async moveFile(oldPath, newPath, overwrite = true) {
         const source = this.buildObjectUrl(oldPath);
         await this.ensureDirectory(newPath);

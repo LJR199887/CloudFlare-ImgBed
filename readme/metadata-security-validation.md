@@ -79,3 +79,27 @@ node scripts/verify-file-boundaries.mjs (Join-Path $out 'index.js') 'C:/Program 
 最后一个参数可省略：提供时启动独立的临时无头浏览器，验证上传的 HTML 和 JS
 不会在页面中执行，并以成功解码 PNG 为对照。PR 检查运行 Node 22/24 的全量测试
 及编译产物 HTTP 冒烟测试，不部署、不读取仓库 Secrets。
+
+## 本轮全盘审查修复
+
+- Docker 外链下载将非法 HTTP 状态/响应头转换异常收敛为 Promise 拒绝，销毁异常
+  响应流，不再让异步事件回调抛错退出整个进程。
+- 管理 API 按静态路由、方法和 action 判定权限。文件名中的 `list` / `delete`
+  不参与权限选择；索引重建、合并、清除需要 `manage`，不能使用只读 token。
+- MIME 只输出规范化的安全类型及单一 charset；拒绝带逗号/换行的歧义类型，
+  不转发其任意参数。编译产物和真实浏览器覆盖伪装为 text/plain / image/png 的 JS。
+- R2/S3/WebDAV 移动和重命名依次执行：复制对象、写目标记录、删源记录、清理源对象。
+  WebDAV 使用非覆盖 COPY（不支持 COPY 的服务会安全失败，不回退到破坏性 MOVE）。
+  复制或数据库写入失败时不删除源对象；源对象清理失败时新链接保持有效，响应携带
+  `warnings` 并记录服务端日志。S3 的 CopySource 按路径段编码。
+- 存储与 KV/D1 之间没有分布式事务：故障时可能保留两个对象或两条记录。不要将
+  网络超时理解为“肯定未写入”。检查两侧实际状态后再重试/清理，避免删除有效副本；
+  WebDAV 的非覆盖 COPY 会拒绝直接覆盖故障留下的目标对象。
+- Docker 在原生 fetch 边界清除已解压响应的 Content-Encoding 和旧 Content-Length；
+  支持 gzip/x-gzip、deflate、br 及组合。Range 默认协商 identity；若远端仍返回
+  压缩的部分响应则拒绝，避免伪造解压后字节范围。版本相关/未知编码保守拒绝，
+  HEAD/304 和未解压的原始 HTTP 下载流不改动。Workers 不使用此 Node 专用适配层。
+
+`test/securityReviewFixes.test.js` 覆盖真实 HTTP 解析器、压缩中继、完整 token 验证链、
+KV/D1 × 两类移动操作 × 三类存储的复制/写入/删除故障注入。真实存储账号与完整 Docker
+容器仍需部署环境联调；本地测试不能代替线上验证。原自动清理逻辑不变，未引入上游过期功能。

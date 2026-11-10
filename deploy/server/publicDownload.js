@@ -42,13 +42,24 @@ export async function fetchPublicHop(url, resolve = lookup) {
             },
             headers:{ 'Accept-Encoding':'identity' },
         }, res => {
-            const headers = new Headers();
-            for (const key of ['content-type','content-length','content-range','content-encoding','content-disposition','etag','last-modified','location']) {
-                if (typeof res.headers[key] === 'string') headers.set(key,res.headers[key]);
+            res.on('error', fail);
+            // EventEmitter callbacks do not reject the enclosing Promise when
+            // they throw. A hostile HTTP peer must not terminate the server.
+            try {
+                if (!Number.isInteger(res.statusCode) || res.statusCode < 200 || res.statusCode > 599) {
+                    throw new Error('Invalid download response status');
+                }
+                const headers = new Headers();
+                for (const key of ['content-type','content-length','content-range','content-encoding','content-disposition','etag','last-modified','location']) {
+                    if (typeof res.headers[key] === 'string') headers.set(key,res.headers[key]);
+                }
+                const empty = [204,205,304].includes(res.statusCode);
+                if (empty) res.resume();
+                done(new Response(empty ? null : Readable.toWeb(res),{status:res.statusCode,headers}));
+            } catch (error) {
+                res.destroy();
+                fail(error);
             }
-            const empty = [204,205,304].includes(res.statusCode);
-            if (empty) res.resume();
-            done(new Response(empty ? null : Readable.toWeb(res),{status:res.statusCode,headers}));
         });
         request.on('error',fail);
         request.setTimeout(30000,() => request.destroy(new Error('Download timed out')));

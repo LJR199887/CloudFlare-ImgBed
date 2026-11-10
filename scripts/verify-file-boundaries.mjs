@@ -29,15 +29,24 @@ try {
     const origin = await mf.ready;
     const kv = await mf.getKVNamespace('img_url');
     const req = (path, options) => fetch(new URL(path, origin), options);
-    async function upload(name, bytes) {
+    async function upload(name, bytes, type = 'application/octet-stream') {
         const form = new FormData();
-        form.set('file', new File([bytes], name, {type:'application/octet-stream'}));
+        form.set('file', new File([bytes], name, {type}));
         const response = await req('/upload?uploadChannel=cfr2&autoRetry=false',{method:'POST',body:form});
         assert.equal(response.status,200,await response.clone().text());
         return (await response.json())[0].src;
     }
     const html = await upload('probe.html','<script>parent.payloadExecuted=true</script>');
     const js = await upload('probe.js','window.payloadExecuted=true');
+    const ambiguous = [];
+    for (const type of ['text/plain; a=b, text/javascript', 'image/png; a=b, application/javascript', 'text/plain; charset=UTF-8, text/javascript']) {
+        const path = await upload('ambiguous.txt', 'window.payloadExecuted=true', type);
+        ambiguous.push(path);
+        const response = await req(path);
+        assert.equal(response.headers.get('Content-Type'), 'application/octet-stream');
+        assert.match(response.headers.get('Content-Disposition'), /^attachment;/);
+        await response.arrayBuffer();
+    }
     const png = await upload('probe.png',Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64'));
     for (const options of [{}, {method:'HEAD'}, {headers:{Range:'bytes=0-1'}}]) {
         const response = await req(html,options);
@@ -56,11 +65,32 @@ try {
     assert.equal(outgoing[1].headers.get('range'),'bytes=0-0'); assert.ok(!tg.headers.has('set-cookie') && !tg.headers.has('refresh'));
     console.log('PASS: compiled Worker upload, GET/HEAD/Range, raster preview and outbound/response header isolation');
 
+    // Exercise the actual compiled middleware/router, not only its helper.
+    await kv.put('manage@sysConfig@security', JSON.stringify({
+        auth: { admin: { adminUsername: 'fixture-admin', adminPassword: 'fixture-only' } },
+        apiTokens: { tokens: {
+            read: { token: 'read-fixture', permissions: ['list'] },
+            manage: { token: 'manage-fixture', permissions: ['manage'] },
+        } },
+    }));
+    await kv.put('list/probe.png', '', { metadata: { Channel: 'CloudflareR2', FileName: 'original' } });
+    const patch = token => req('/api/manage/metadata/list/probe.png', {
+        method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ FileName: 'changed' }),
+    });
+    assert.equal((await patch('read-fixture')).status, 401);
+    assert.equal((await kv.getWithMetadata('list/probe.png')).metadata.FileName, 'original');
+    for (const action of ['rebuild', 'merge-operations', 'delete-operations']) {
+        assert.equal((await req(`/api/manage/list?action=${action}`, { headers: { Authorization: 'Bearer read-fixture' } })).status, 401);
+    }
+    assert.equal((await patch('manage-fixture')).status, 200);
+    assert.equal((await kv.getWithMetadata('list/probe.png')).metadata.FileName, 'changed');
+    console.log('PASS: compiled Worker rejects list-token metadata/index mutations and accepts manage-token control');
+
     if (browser) {
         // If either an HTML document or an uploaded JS subresource executes,
         // it sets the flag. Also require an actual PNG decode as a control.
         page = `<!doctype html><body><output>pending</output><script>window.payloadExecuted=false;</script>
-        <script src="${js}"></script><iframe src="${html}"></iframe><img id="p" src="${png}">
+        <script src="${js}"></script>${ambiguous.map(path => `<script src="${path}"></script>`).join('')}<iframe src="${html}"></iframe><img id="p" src="${png}">
         <script>window.onload=()=>document.querySelector('output').textContent=
         (!window.payloadExecuted && document.getElementById('p').naturalWidth===1) ? 'PASS' : 'FAIL';</script>`;
         const tempRoot = await realpath(tmpdir());
@@ -88,7 +118,7 @@ try {
                     else reject(new Error('Browser did not report a successful probe'));
                 });
             });
-            console.log('PASS: browser blocked uploaded HTML and JS execution while rendering PNG');
+            console.log('PASS: browser blocked HTML, JS and ambiguous MIME execution while rendering PNG');
         } finally {
             const owned = await realpath(profile);
             if (dirname(owned) !== tempRoot || !basename(owned).startsWith('imgbed-isolated-browser-')) throw new Error('Unexpected browser profile path');

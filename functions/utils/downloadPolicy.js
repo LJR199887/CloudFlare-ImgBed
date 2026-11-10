@@ -9,8 +9,12 @@ const INLINE = new Set((
 
 export function applyDownloadPolicy(headers, fileType, encodedName = 'download') {
     const type = String(fileType || '').split(';', 1)[0].trim().toLowerCase();
-    const inline = INLINE.has(type);
-    headers.set('Content-Type', inline ? fileType : 'application/octet-stream');
+    // Never echo the untrusted parameter tail. Commas in it can make the
+    // browser select a second MIME type (including JavaScript).
+    const inline = INLINE.has(type) && !/[\r\n,]/.test(String(fileType));
+    const charset = /;\s*charset\s*=\s*(?:"([a-zA-Z0-9_-]+)"|([a-zA-Z0-9_-]+))\s*(?:;|$)/i.exec(String(fileType));
+    const safeType = type + (charset ? `; charset=${charset[1] || charset[2]}` : '');
+    headers.set('Content-Type', inline ? safeType : 'application/octet-stream');
     headers.set('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${encodedName}"; filename*=UTF-8''${encodedName}`);
     headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Content-Security-Policy', "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
