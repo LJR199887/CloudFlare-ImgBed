@@ -11,9 +11,13 @@ export class WebDAVAPI {
             throw new Error('WebDAV baseUrl is required');
         }
 
-        this.baseUrl = normalizeBaseUrl(baseUrl);
-        this.username = config.username || '';
-        this.password = config.password || '';
+        // Fetch rejects userinfo in request URLs. Support historical channel
+        // URLs by transferring it to Basic auth, never to a URL or Destination.
+        const url = new URL(normalizeBaseUrl(baseUrl));
+        this.username = config.username || decodeURIComponent(url.username);
+        this.password = config.password || decodeURIComponent(url.password);
+        url.username = url.password = '';
+        this.baseUrl = url.toString();
         this.headers = normalizeHeaders(config.headers || config.customHeaders || {});
         this.createDirectory = config.createDirectory !== false;
     }
@@ -24,7 +28,9 @@ export class WebDAVAPI {
 
     buildPublicUrl(path, publicUrl = '') {
         if (!publicUrl) return '';
-        return buildWebDAVUrl(normalizeBaseUrl(publicUrl), path);
+        const url = new URL(normalizeBaseUrl(publicUrl));
+        url.username = url.password = '';
+        return buildWebDAVUrl(url.toString(), path);
     }
 
     getRequestHeaders(extraHeaders = {}) {

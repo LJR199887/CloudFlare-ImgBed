@@ -89,12 +89,13 @@ export function stripSensitiveMetadataInPlace(metadata = {}) {
   }
 
   // WebDAV 地址可能包含 userinfo，保留地址本身但移除用户名和密码
-  if (metadata.WebDAVBaseUrl) {
-    const safeBaseUrl = stripUrlUserinfo(metadata.WebDAVBaseUrl);
-    if (safeBaseUrl) {
-      metadata.WebDAVBaseUrl = safeBaseUrl;
+  for (const key of ['WebDAVBaseUrl', 'WebDAVPublicBaseUrl', 'WebDAVPublicUrl']) {
+    if (!metadata[key]) continue;
+    const safeUrl = stripUrlUserinfo(metadata[key]);
+    if (safeUrl) {
+      metadata[key] = safeUrl;
     } else {
-      delete metadata.WebDAVBaseUrl;
+      delete metadata[key];
     }
   }
 
@@ -125,7 +126,7 @@ export function cleanPersistedMetadataInPlace(metadata = {}) {
 /* ========== 工具函数 ========== */
 
 // 移除 URL 中可能携带的用户名和密码
-function stripUrlUserinfo(value) {
+export function stripUrlUserinfo(value) {
   try {
     const url = new URL(value);
     url.username = '';

@@ -11,6 +11,7 @@ import {
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { hydrateFileCredentials } from '../utils/metadata/fileCredentials.js';
+import { stripUrlUserinfo } from '../utils/metadata/metadataSecurity.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
 
 
@@ -114,6 +115,10 @@ export async function onRequest(context) {  // Contents of context object
     let targetUrl = '';
 
     if (isTgChannel(imgRecord)) {
+        // hydrateFileCredentials is the sole authority for bot selection,
+        // including the original unbound Telegram environment channel.
+        const TgBotToken = imgRecord.metadata.TgBotToken;
+        if (!TgBotToken) return new Response('Telegram channel credentials unavailable', { status: 503 });
         let TgFileID = ''; // Tg的file_id
 
         if (imgRecord.metadata?.Channel === 'Telegram') {
@@ -132,7 +137,6 @@ export async function onRequest(context) {  // Contents of context object
         }
 
         // 获取TG图片真实地址（支持代理域名）
-        const TgBotToken = imgRecord.metadata?.TgBotToken || env.TG_BOT_TOKEN;
         const TgProxyUrl = imgRecord.metadata?.TgProxyUrl || '';
         const tgApi = new TelegramAPI(TgBotToken, TgProxyUrl);
         const filePath = await tgApi.getFilePath(TgFileID);
@@ -204,10 +208,10 @@ function getChunkedFileCacheControl(context) {
 
 // 处理 Telegram 渠道分片文件读取
 async function handleTelegramChunkedFile(context, imgRecord, encodedFileName, fileType) {
-    const { env, request, url, Referer } = context;
+    const { request } = context;
 
     const metadata = imgRecord.metadata;
-    const TgBotToken = metadata.TgBotToken || env.TG_BOT_TOKEN;
+    const TgBotToken = metadata.TgBotToken;
     const TgProxyUrl = metadata.TgProxyUrl || '';
 
     // 从KV的value中读取分片信息
@@ -946,7 +950,7 @@ async function handleWebDAVFile(context, metadata, encodedFileName, fileType) {
 
     try {
         const filePath = metadata.WebDAVFilePath;
-        const publicUrl = metadata.WebDAVPublicUrl;
+        const publicUrl = metadata.WebDAVPublicUrl && stripUrlUserinfo(metadata.WebDAVPublicUrl);
 
         if (!filePath && !publicUrl) {
             return new Response('Error: WebDAV file info not found', { status: 500 });

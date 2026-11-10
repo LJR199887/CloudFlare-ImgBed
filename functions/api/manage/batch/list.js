@@ -8,6 +8,7 @@
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { prepareMetadataForBackup } from '../../../utils/metadata/writeSafety.js';
 import { loadChannelConfig } from '../../../utils/metadata/channelConfig.js';
+import { needsChunkManifest, parseChunkManifest } from '../../../utils/chunkManifest.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -41,22 +42,6 @@ function jsonResponse(data, status = 200) {
  */
 function errorResponse(message, status = 400) {
   return jsonResponse({ success: false, error: message }, status);
-}
-
-/**
- * 检查文件是否为需要读取 value 的分块文件
- * 仅 TelegramNew 和 Discord 渠道的分块文件需要读取 value
- * 
- * @param {Object} metadata - 文件元数据
- * @returns {boolean}
- */
-function isChunkedFileNeedingValue(metadata) {
-  if (!metadata || !metadata.IsChunked) {
-    return false;
-  }
-  
-  const channel = metadata.Channel;
-  return channel === 'TelegramNew' || channel === 'Discord';
 }
 
 /**
@@ -134,15 +119,13 @@ export async function onRequestGet(context) {
       };
 
       // 如果需要包含 value 且是分块文件，读取 value
-      if (includeValue && isChunkedFileNeedingValue(item.metadata)) {
+      if (includeValue && needsChunkManifest(item.metadata)) {
         try {
           const value = await db.get(item.name);
-          if (value) {
-            record.value = value;
-          }
-        } catch (valueError) {
-          // 读取 value 失败时记录错误但继续处理
-          console.error(`Failed to read value for ${item.name}:`, valueError);
+          parseChunkManifest(value, item.metadata);
+          record.value = value;
+        } catch {
+          return errorResponse(`Cannot export chunk manifest for ${item.name}; verify the file and retry the backup.`, 500);
         }
       }
 

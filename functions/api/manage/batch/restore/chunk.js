@@ -6,6 +6,7 @@
 
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
 import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
+import { needsChunkManifest, parseChunkManifest } from '../../../../utils/chunkManifest.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -79,6 +80,7 @@ export async function onRequestPost(context) {
               key.startsWith('manage@') || key.startsWith('chunk_')) {
             throw new Error('Invalid file backup record');
           }
+          if (needsChunkManifest(fileData.metadata)) parseChunkManifest(fileData.value, fileData.metadata);
           await assertRestoredFileSafe(db, env, fileData.metadata);
           if (fileData.value) {
             // 有 value 的文件（如 Telegram/Discord 分块文件）

@@ -14,7 +14,11 @@ export async function hydrateFileCredentials(env, metadata = {}) {
     const db = getDatabase(env);
     const config = await loadChannelConfig(db, env, 'file credentials');
     const channel = await findConfiguredChannel(config, group, metadata);
-    if (!channel) return { ...metadata };
+    // A file (including an imported one) is not an authority for where to
+    // send a bot token. Orphaned legacy tokens may still use the official API.
+    if (!channel) return group === 'telegram'
+        ? { ...metadata, TgProxyUrl: '' }
+        : { ...metadata };
 
     const result = { ...metadata };
     if (group === 's3') Object.assign(result, {
@@ -29,12 +33,12 @@ export async function hydrateFileCredentials(env, metadata = {}) {
     if (group === 'telegram') Object.assign(result, {
         TgBotToken: channel.botToken || metadata.TgBotToken,
         TgChatId: metadata.TgChatId || channel.chatId,
-        TgProxyUrl: channel.proxyUrl || metadata.TgProxyUrl || '',
+        TgProxyUrl: channel.proxyUrl || '',
     });
     if (group === 'discord') Object.assign(result, {
         DiscordBotToken: channel.botToken || metadata.DiscordBotToken,
         DiscordChannelId: metadata.DiscordChannelId || channel.channelId,
-        DiscordProxyUrl: channel.proxyUrl || metadata.DiscordProxyUrl || '',
+        DiscordProxyUrl: channel.proxyUrl || '',
     });
     if (group === 'huggingface') Object.assign(result, {
         HfToken: channel.token || metadata.HfToken,
