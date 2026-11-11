@@ -298,17 +298,69 @@ try {
     assert.equal(save.status, 200, await save.clone().text());
     const update = await req(security, { method: 'POST', headers, body: JSON.stringify({ access: { whiteListMode: true } }) });
     assert.equal(update.status, 200, await update.clone().text());
-    const restored = await req('/api/manage/batch/restore/chunk', { method: 'POST', headers, body: JSON.stringify({
-        type: 'settings', data: { 'sysConfig@security': { auth: { admin: { adminUsername: 'fixture-admin', adminPassword: 'after' } } } },
-    }) });
-    assert.equal(restored.status, 200, await restored.clone().text());
-    assert.equal((await restored.json()).restoredCount, 1);
+    // Export real multipart rows, then import with the exact processor and
+    // completion code loaded by the published management page.
+    const chunkMetadata = { Channel: 'TelegramNew', ChannelName: 'test', TgBotId: '123', TgChatId: 'test-chat',
+        TimeStamp: 1, IsChunked: true, TotalChunks: 1, FileSizeBytes: 1 };
+    const manifest = JSON.stringify([{ index: 0, fileId: 'telegram-fixture', size: 1 }]);
+    const restoredIds = Array.from({ length: 52 }, (_, i) => `restore-${String(i).padStart(2,'0')}.bin`);
+    await db.batch(restoredIds.map(id => db.prepare('INSERT INTO files (id, value, metadata, timestamp) VALUES (?, ?, ?, ?)')
+        .bind(id, manifest, JSON.stringify(chunkMetadata), 1)));
+    const backup = await req('/api/manage/batch/list?limit=1000&includeValue=true', { headers });
+    assert.equal(backup.status, 200, await backup.clone().text());
+    const { records } = await backup.json();
+    assert.deepEqual(records.map(record => record.id), restoredIds);
+    assert.ok(records.every(record => record.value === manifest));
+    await db.prepare('DELETE FROM files WHERE id GLOB ?').bind('restore-*.bin').run();
+    await db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+        .bind('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 500 })).run();
+
+    const html = await readFile('frontend-dist/index.html', 'utf8');
+    const runtime = await readFile('frontend-dist/js/' + html.match(/app\.[a-f0-9]{8}\.js/)[0], 'utf8');
+    const frontend = await readFile('frontend-dist/js/381.' + runtime.match(/381:"([a-f0-9]{8})"/)[1] + '.js', 'utf8');
+    const processorStart = frontend.indexOf('class cu{');
+    const processorEnd = frontend.indexOf('var uu=cu;', processorStart);
+    assert.ok(processorStart >= 0 && processorEnd > processorStart);
+    const processorSource = frontend.slice(processorStart, processorEnd);
+    class BatchOperationError extends Error { constructor(message, code) { super(message); this.code = code; } }
+    const calls = [];
+    const Processor = new Function('Pe', 'su', `${processorSource}; return cu;`)({ A: (path, options) => {
+        calls.push(JSON.parse(options.body).type);
+        return req(path, { ...options, headers: { ...options.headers, ...headers } });
+    } }, BatchOperationError);
+    const result = await new Processor().restore({ data: {
+        files: Object.fromEntries(records.map(({ id, ...file }) => [id, file])),
+        settings: {
+            'sysConfig@upload': { telegram: { channels: [{ name: 'test', botToken: '123:fixture', chatId: 'test-chat' }] } },
+            'sysConfig@security': { auth: { admin: { adminUsername: 'fixture-admin', adminPassword: 'after' } } },
+        },
+    } });
+    assert.equal(result.restoredFiles, restoredIds.length);
+    assert.equal(result.failedFiles + result.failedSettings, 0);
+    assert.equal(result.reauthenticationRequired, true);
+    assert.equal(calls.at(-1), 'settings');
+    const completion = frontend.match(/n\.failedFiles\|\|n\.failedSettings\?this\.\$message\.warning\(.+?this\.\$router\.replace\(\{name:"adminLogin"\}\)/)?.[0];
+    assert.ok(completion, 'published restore UI must navigate to login, not request a rebuild');
+    assert.ok(!frontend.includes('await new Promise(t=>setTimeout(t,500)),await this.rebuildIndex()'));
+    let redirected;
+    await new Function(`return async function(n){${completion}}`)().call({
+        $message: { success() {}, warning() { assert.fail('unexpected partial-restore warning'); } },
+        $t: key => key, $router: { async replace(target) { redirected = target.name; } },
+    }, result);
+    assert.equal(redirected, 'adminLogin');
     assert.equal((await req(security, { headers })).status, 401);
     assert.equal((await login('before')).status, 401);
     const fresh = await login('after');
     assert.equal(fresh.status, 200, await fresh.clone().text());
-    const config = await req(security, { headers: { Cookie: fresh.headers.get('set-cookie').split(';')[0] } });
+    const freshHeaders = { Cookie: fresh.headers.get('set-cookie').split(';')[0] };
+    const config = await req(security, { headers: freshHeaders });
     assert.equal(config.status, 200);
     assert.equal((await config.json()).sessionEpochs, undefined);
-    console.log('PASS: compiled D1 Worker restores security settings and rejects old sessions');
+    const list = await req('/api/manage/list?count=100', { headers: freshHeaders });
+    assert.equal(list.status, 200, await list.clone().text());
+    const listed = await list.json();
+    assert.equal(listed.isIndexedResponse, true);
+    assert.deepEqual(listed.files.map(file => file.name).filter(id => id.startsWith('restore-')).sort(), restoredIds);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM index_operations').first()).n, 0);
+    console.log('PASS: shipped restore workflow exports and imports multipart files, rotates authentication, and lists restored files after login');
 } finally { await d1Worker.dispose(); }

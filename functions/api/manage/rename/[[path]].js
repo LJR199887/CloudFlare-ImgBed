@@ -133,11 +133,11 @@ export async function onRequest(context) {
                     }
 
                     // 复制到新位置
-                    const copied = await R2DataBase.put(newFileId, object.body, {
+                    const copied = await guardProviderWrite(() => R2DataBase.put(newFileId, object.body, {
                         httpMetadata: object.httpMetadata,
                         customMetadata: object.customMetadata,
                         onlyIf: new Headers({ 'If-None-Match': '*' }),
-                    });
+                    }), () => retainClaim(newFileId));
                     if (copied === null) throw new FileMutationConflict();
                 };
 

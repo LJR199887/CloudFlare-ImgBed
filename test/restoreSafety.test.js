@@ -1,3 +1,4 @@
+import { batchAddFilesToIndex } from '../functions/utils/indexManager.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createDatabaseAdapter } from '../functions/utils/databaseAdapter.js';
@@ -29,6 +30,7 @@ function fixture(backend) {
                     return row ? { value: row.value, metadata: JSON.stringify(row.metadata) } : null;
                 },
                 async run() {
+                    if (sql.startsWith('INSERT OR REPLACE INTO index_operations')) return;
                     assert.match(sql, /^INSERT OR REPLACE INTO (files|settings) /);
                     records.set(args[0], { value: args[1], metadata: sql.includes('INTO files ')
                         ? JSON.parse(args[2]) : {} });
@@ -55,7 +57,7 @@ const examples = [
 ];
 
 async function restore(env, type, data) {
-    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
+    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe, batchAddFilesToIndex });
     const response = await route.onRequestPost({ env, request: new Request('https://img.example/api/manage/batch/restore/chunk', {
         method: 'POST', body: JSON.stringify({ type, data }),
     }) });

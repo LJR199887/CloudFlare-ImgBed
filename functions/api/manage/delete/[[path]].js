@@ -22,6 +22,8 @@ export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
 
     const url = new URL(request.url);
+    const warnings = [];
+    const warnRelease = ids => warnings.push({ ids, message: 'File deletion finished but claim release could not be verified; reconcile before reusing the name' });
 
     // 读取folder参数，判断是否为文件夹删除请求
     const folder = url.searchParams.get('folder');
@@ -31,9 +33,9 @@ export async function onRequest(context) {
             if (needsPagedFolderMutation(env)) {
                 const folder = params.path.split(',').join('/').replace(/\/$/, '');
                 return await runPagedFolderMutation(context, {
-                    folder, resultKey: 'deleted', headers: corsHeaders,
+                    folder, resultKey: 'deleted', headers: corsHeaders, warnings,
                     async mutate(fileId, canDelete) {
-                        return await deleteFile(env, fileId, `https://${url.hostname}/file/${fileId}`, url, canDelete) ? fileId : null;
+                        return await deleteFile(env, fileId, `https://${url.hostname}/file/${fileId}`, url, canDelete, warnRelease) ? fileId : null;
                     },
                     queueIndex: ids => batchRemoveFilesFromIndex(context, ids),
                 });
@@ -64,7 +66,7 @@ export async function onRequest(context) {
                     const fileId = file.name;
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-                    const success = await deleteFile(env, fileId, cdnUrl, url);
+                    const success = await deleteFile(env, fileId, cdnUrl, url, null, warnRelease);
                     if (success) {
                         deletedFiles.push(fileId);
                     } else {
@@ -89,7 +91,8 @@ export async function onRequest(context) {
             return new Response(JSON.stringify({
                 success: true,
                 deleted: deletedFiles,
-                failed: failedFiles
+                failed: failedFiles,
+                warnings,
             }), {
                 headers: { 'Content-Type': 'application/json', ...corsHeaders }
             });
@@ -112,7 +115,7 @@ export async function onRequest(context) {
         const fileId = params.path.split(',').join('/');
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-        const success = await deleteFile(env, fileId, cdnUrl, url);
+        const success = await deleteFile(env, fileId, cdnUrl, url, null, warnRelease);
         if (!success) {
             throw new Error('Delete file failed');
         } else {
@@ -122,7 +125,8 @@ export async function onRequest(context) {
 
         return new Response(JSON.stringify({
             success: true,
-            fileId: fileId
+            fileId: fileId,
+            warnings,
         }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
@@ -138,7 +142,7 @@ export async function onRequest(context) {
 }
 
 // 删除单个文件的核心函数
-export async function deleteFile(env, fileId, cdnUrl, url, canDelete = null) {
+export async function deleteFile(env, fileId, cdnUrl, url, canDelete = null, onReleaseFailure) {
     try {
         return await withFileMutation(env, [fileId], async (env, retainClaim) => {
             // 读取图片信息
@@ -194,7 +198,7 @@ export async function deleteFile(env, fileId, cdnUrl, url, canDelete = null) {
             await purgePublicFileListCache(url.origin, normalizedFolder);
 
             return true;
-        });
+        }, { onReleaseFailure });
     } catch (e) {
         console.error('Delete file failed:', e);
         return false;

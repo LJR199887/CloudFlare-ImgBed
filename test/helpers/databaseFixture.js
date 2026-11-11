@@ -14,13 +14,21 @@ export function databaseFixture(t, backend = 'KV') {
         const sqlite = new DatabaseSync(':memory:');
         t.after(() => sqlite.close());
         sqlite.exec(readFileSync(new URL('../../database/init.sql', import.meta.url), 'utf8'));
-        env = { img_d1: { prepare(sql) {
+        env = { img_d1: { async batch(statements) {
+            sqlite.exec('BEGIN');
+            try {
+                const results = statements.map(statement => statement.execute());
+                sqlite.exec('COMMIT');
+                return results;
+            } catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+        }, prepare(sql) {
             let params = [];
             return {
                 bind(...values) { params = values.map(v => v == null ? null : typeof v === 'boolean' ? Number(v) : v); return this; },
                 async first() { return sqlite.prepare(sql).get(...params) ?? null; },
                 async all() { return { results: sqlite.prepare(sql).all(...params) }; },
-                async run() { return { success: true, meta: { changes: sqlite.prepare(sql).run(...params).changes } }; },
+                async run() { return this.execute(); },
+                execute() { return { success: true, meta: { changes: sqlite.prepare(sql).run(...params).changes } }; },
             };
         } } };
         seed = (id, value, metadata) => sqlite.prepare('INSERT OR REPLACE INTO files (id, value, metadata, timestamp) VALUES (?, ?, ?, ?)')

@@ -79,6 +79,12 @@ D1Database.prototype.getFileWithMetadata = function(fileId) {
     return this.getFile(fileId);
 };
 
+D1Database.prototype.getFileValues = async function(ids) {
+    const result = await this.db.prepare(`SELECT id, value FROM files WHERE id IN (${ids.map(() => '?').join(',')})`)
+        .bind(...ids).all();
+    return new Map((result.results || []).map(row => [row.id, row.value]));
+};
+
 /**
  * 删除文件记录 (替代 KV.delete)
  */
@@ -254,10 +260,60 @@ D1Database.prototype.deleteIndexOperation = function(operationId) {
 
 // Folder pages can enqueue many operations in short succession. Keep index
 // merges from spending one D1 query per operation read and per deletion.
-D1Database.prototype.listPendingIndexOperations = async function(afterId, limit) {
-    const response = await this.db.prepare('SELECT id, type, timestamp, data FROM index_operations WHERE id > ? ORDER BY id LIMIT ?')
-        .bind(afterId || '', limit).all();
+D1Database.prototype.listPendingIndexOperations = async function(limit) {
+    // Rows, not the previous random operation ID, are the work queue.
+    const response = await this.db.prepare('SELECT id, type, timestamp, data FROM index_operations ORDER BY id LIMIT ?')
+        .bind(limit).all();
     return (response.results || []).map(row => ({ ...row, data: JSON.parse(row.data) }));
+};
+
+D1Database.prototype.getIndexFiles = async function(ids) {
+    const result = await this.db.prepare('SELECT id, metadata FROM files WHERE id IN (SELECT value FROM json_each(?))')
+        .bind(JSON.stringify(ids)).all();
+    return (result.results || []).map(row => ({ id: row.id, metadata: JSON.parse(row.metadata || '{}') }));
+};
+
+D1Database.prototype.readIndexSnapshot = async function() {
+    const key = 'manage@index@meta';
+    const metadata = await this.getSetting(key);
+    if (metadata == null) return new Map();
+    const count = JSON.parse(metadata).chunkCount;
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Invalid index chunk count');
+    const snapshot = new Map([[key, metadata]]);
+    // Keep each result below D1's response size ceiling and never mix chunks
+    // from two revisions. Every chunk read is conditional on the same meta.
+    for (let start = 0; start < count; start += 16) {
+        const keys = Array.from({ length: Math.min(16, count - start) }, (_, i) => `manage@index_${start + i}`);
+        const response = await this.db.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})
+            AND (SELECT value FROM settings WHERE key = ?) = ?`).bind(...keys, key, metadata).all();
+        if (response.results?.length !== keys.length) throw new Error('Index chunks missing or index changed during read');
+        for (const row of response.results) snapshot.set(row.key, row.value);
+    }
+    return snapshot;
+};
+
+D1Database.prototype.writeIndexSnapshot = async function(metadata, chunks, expected, operationIds = []) {
+    const key = 'manage@index@meta';
+    const value = JSON.stringify({ ...metadata, revision: crypto.randomUUID() });
+    const begin = expected === undefined
+        ? this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind(key, value)
+        : expected === null
+            ? this.db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').bind(key, value)
+            : this.db.prepare('UPDATE settings SET value = ? WHERE key = ? AND value = ?').bind(value, key, expected);
+    const statements = [begin];
+    for (let i = 0; i < chunks.length; i++) {
+        statements.push(this.db.prepare('INSERT OR REPLACE INTO settings (key, value) SELECT ?, ? WHERE (SELECT value FROM settings WHERE key = ?) = ?')
+            .bind(`manage@index_${i}`, JSON.stringify(chunks[i]), key, value));
+    }
+    statements.push(this.db.prepare(`DELETE FROM settings WHERE key GLOB 'manage@index_[0-9]*'
+        AND CAST(substr(key, length('manage@index_') + 1) AS INTEGER) >= ? AND (SELECT value FROM settings WHERE key = ?) = ?`)
+        .bind(chunks.length, key, value));
+    if (operationIds.length) {
+        statements.push(this.db.prepare('DELETE FROM index_operations WHERE id IN (SELECT value FROM json_each(?)) AND (SELECT value FROM settings WHERE key = ?) = ?')
+            .bind(JSON.stringify(operationIds), key, value));
+    }
+    const results = await this.db.batch(statements);
+    return results[0]?.meta?.changes > 0;
 };
 
 D1Database.prototype.deleteIndexOperations = function(operationIds) {

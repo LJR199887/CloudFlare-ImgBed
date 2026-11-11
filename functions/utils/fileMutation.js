@@ -180,7 +180,7 @@ async function fencedKV(env, ids) {
     return { ...env, img_url: wrapped };
 }
 
-export async function withFileMutation(env, fileIds, action, { requireRelease = false } = {}) {
+export async function withFileMutation(env, fileIds, action, { requireRelease = false, onReleaseFailure } = {}) {
     const ids = [...new Set(fileIds)].sort();
     if (ids.some(id => !isSafeFileId(id))) {
         throw new FileMutationConflict('Invalid file ID');
@@ -189,7 +189,8 @@ export async function withFileMutation(env, fileIds, action, { requireRelease = 
     const owner = crypto.randomUUID();
     const releases = [];
     const retained = new Set();
-    let completed = false, releaseFailed = false;
+    let completed = false;
+    const releaseFailures = [];
     try {
         await lock.prepare?.();
         for (const id of ids) releases.push([id, await lock.acquire(id, owner)]);
@@ -201,11 +202,12 @@ export async function withFileMutation(env, fileIds, action, { requireRelease = 
             if (retained.has(id)) continue;
             try { await release(); }
             catch (error) {
-                releaseFailed = true;
+                releaseFailures.push(id);
                 console.error('File mutation claim release failed:', error);
             }
         }
-        if (requireRelease && completed && (releaseFailed || retained.size)) {
+        if (completed && releaseFailures.length) onReleaseFailure?.(releaseFailures);
+        if (requireRelease && completed && (releaseFailures.length || retained.size)) {
             throw new Error('File record was written but its claim was not released; reconcile before retrying');
         }
     }

@@ -32,11 +32,15 @@ const end = bundle.indexOf('var uu=cu;', start);
 if (start < 0 || end < 0 || bundle.slice(start, end).includes('\n') || replacement.includes('\n')) {
     throw new Error('Unexpected webpack layout; inspect bundle before patching');
 }
-if (bundle.slice(start, end) === replacement) {
+const oldFinish = 'this.$message.success(this.$t("sysStatus.restoreSuccess",{files:n.restoredFiles,settings:n.restoredSettings})),await new Promise(t=>setTimeout(t,500)),await this.rebuildIndex()';
+const newFinish = 'n.failedFiles||n.failedSettings?this.$message.warning(this.$t("sysStatus.restoreFailed")+" ("+n.failedFiles+" files, "+n.failedSettings+" settings)"):this.$message.success(this.$t("sysStatus.restoreSuccess",{files:n.restoredFiles,settings:n.restoredSettings})),n.reauthenticationRequired&&await this.$router.replace({name:"adminLogin"})';
+const finishStart = bundle.indexOf(oldFinish, end);
+if (finishStart < 0 && !bundle.includes(newFinish)) throw new Error('Restore completion handler changed; inspect before patching');
+if (bundle.slice(start, end) === replacement && finishStart < 0) {
     console.log('RestoreProcessor bundle is up to date');
     process.exit(0);
 }
-const patched = bundle.slice(0, start) + replacement + bundle.slice(end);
+let patched = bundle.slice(0, start) + replacement + bundle.slice(end);
 const map = JSON.parse(await readFile(resolve(jsDir, `${chunkName}.map`), 'utf8'));
 const localMap = JSON.parse(build.map);
 const mappings = decode(map.mappings);
@@ -61,6 +65,17 @@ mappings[line] = [
     [startColumn], ...injected,
     ...mappings[line].filter(segment => segment[0] >= endColumn).map(segment => [segment[0] + shift, ...segment.slice(1)]),
 ];
+if (finishStart >= 0) {
+    const offset = finishStart + shift;
+    const finishLine = patched.slice(0, offset).split('\n').length - 1;
+    const col = offset - patched.lastIndexOf('\n', offset) - 1;
+    const delta = newFinish.length - oldFinish.length;
+    mappings[finishLine] = [
+        ...mappings[finishLine].filter(segment => segment[0] < col), [col],
+        ...mappings[finishLine].filter(segment => segment[0] >= col + oldFinish.length).map(segment => [segment[0] + delta, ...segment.slice(1)]),
+    ];
+    patched = patched.slice(0, offset) + newFinish + patched.slice(offset + oldFinish.length);
+}
 map.mappings = encode(mappings);
 
 function bodyOf(code) { return code.replace(/\r?\n\/\/# sourceMappingURL=.*?\s*$/, ''); }

@@ -1,3 +1,4 @@
+import { batchAddFilesToIndex } from '../functions/utils/indexManager.js';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { describe, it } from 'node:test';
@@ -36,7 +37,7 @@ describe('shipped frontend restore workflow', () => {
         for (const backend of ['KV', 'D1']) {
             it(`${bundled ? 'bundle' : 'source'}/${backend}: restores channels, files, then authentication in a single pass`, async t => {
                 const f = databaseFixture(t, backend);
-                const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
+                const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe, batchAddFilesToIndex });
                 const calls = [];
                 const Processor = await processorClass(bundled, async (url, options) => {
                     assert.equal(url, '/api/manage/batch/restore/chunk');
@@ -84,9 +85,24 @@ describe('shipped frontend restore workflow', () => {
             assert.ok(progress.every(p => p.percentage == null || (Number.isFinite(p.percentage) && p.percentage <= 100)));
         });
 
+        it(`${bundled ? 'bundle' : 'source'}: does not rotate credentials after a partial file restore`, async () => {
+            const seen = [];
+            const Processor = await processorClass(bundled, async (_url, options) => {
+                const {type,data}=JSON.parse(options.body);
+                seen.push(Object.keys(data));
+                return Response.json({success:true,restoredCount:type==='files'?0:1,failedCount:type==='files'?1:0});
+            });
+            const result = await new Processor().restore({data:{
+                files:{'failed.bin':{metadata:{}}},
+                settings:{'sysConfig@page':{},'sysConfig@security':{}},
+            }});
+            assert.deepEqual(seen,[['failed.bin'],['sysConfig@page']]);
+            assert.equal(result.failedFiles,1);assert.equal(result.failedSettings,1);assert.equal(result.reauthenticationRequired,false);
+        });
+
         it(`${bundled ? 'bundle' : 'source'}: default restore batches obey the D1 file limit`, async t => {
             const { env } = databaseFixture(t, 'D1');
-            const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
+            const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe, batchAddFilesToIndex });
             const sizes = [];
             const Processor = await processorClass(bundled, async (url, options) => {
                 sizes.push(Object.keys(JSON.parse(options.body).data).length);

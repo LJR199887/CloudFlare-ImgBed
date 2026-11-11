@@ -198,7 +198,7 @@ function assembleChunks(chunks) {
  * @param {Object} env - 环境变量
  * @returns {Promise<{success: boolean, metadata?: Object, error?: string}>}
  */
-async function saveIndex(db, files, env) {
+async function saveIndex(db, files, env, expected) {
   try {
     files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
@@ -241,6 +241,13 @@ async function saveIndex(db, files, env) {
       chunkCount: chunks.length,
       chunkSize: chunkSize,
     };
+
+    if (expected !== undefined) {
+      if (!await db.writeIndexSnapshot(metadata, chunks, expected)) {
+        return { success: false, conflict: true, error: 'Index changed while the rebuild was being finalized; retry' };
+      }
+      return { success: true, metadata };
+    }
 
     await db.put(INDEX_META_KEY, JSON.stringify(metadata));
 
@@ -350,17 +357,19 @@ export async function onRequestPost(context) {
 
     // 4. 获取数据库实例
     const db = getDatabase(env);
+    const atomic = typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function';
+    const expected = atomic ? await db.get(INDEX_META_KEY) : undefined;
 
     // 5. 处理空索引的情况
     if (totalChunks === 0 || totalFiles === 0) {
       // 保存空索引
-      const saveResult = await saveIndex(db, [], env);
+      const saveResult = await saveIndex(db, [], env, expected);
       if (!saveResult.success) {
-        return errorResponse('Failed to save empty index', 500, saveResult.error);
+        return errorResponse('Failed to save empty index', saveResult.conflict ? 409 : 500, saveResult.error);
       }
 
       // 清理旧的索引分块
-      await cleanupOldIndexChunks(db, 0);
+      if (!atomic) await cleanupOldIndexChunks(db, 0);
 
       return jsonResponse({
         success: true,
@@ -387,12 +396,12 @@ export async function onRequestPost(context) {
     // 9. 清理旧的索引分块（在保存新索引之前）
     const chunkSize = getIndexChunkSize(env);
     const newChunkCount = Math.ceil(allFiles.length / chunkSize);
-    await cleanupOldIndexChunks(db, newChunkCount);
+    if (!atomic) await cleanupOldIndexChunks(db, newChunkCount);
 
     // 10. 保存新索引
-    const saveResult = await saveIndex(db, allFiles, env);
+    const saveResult = await saveIndex(db, allFiles, env, expected);
     if (!saveResult.success) {
-      return errorResponse('Failed to save index', 500, saveResult.error);
+      return errorResponse('Failed to save index', saveResult.conflict ? 409 : 500, saveResult.error);
     }
 
     // 11. 清理临时分块数据

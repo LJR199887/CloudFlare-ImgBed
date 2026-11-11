@@ -1,3 +1,4 @@
+import { batchAddFilesToIndex } from '../functions/utils/indexManager.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createDatabaseAdapter } from '../functions/utils/databaseAdapter.js';
@@ -14,7 +15,7 @@ async function exportFiles(env) {
 }
 
 async function restore(env, data) {
-    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
+    const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe, batchAddFilesToIndex });
     return (await route.onRequestPost({ env, request: new Request('https://img.example/restore', {
         method: 'POST', body: JSON.stringify({ type: 'files', data }),
     }) })).json();

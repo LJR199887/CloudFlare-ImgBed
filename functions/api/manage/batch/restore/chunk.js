@@ -11,6 +11,8 @@ import { isBackupSettingKey } from '../../../../utils/backupSettings.js';
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
 import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
 import { needsChunkManifest, parseChunkManifest } from '../../../../utils/chunkManifest.js';
+import { prepareMetadataForStorage } from '../../../../utils/metadata/webdavIdentity.js';
+import { batchAddFilesToIndex } from '../../../../utils/indexManager.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -76,6 +78,7 @@ export async function onRequestPost(context) {
     const errors = [];
 
     if (type === 'files') {
+      const written = [];
       // Leave budget for authorization, credential checks, and releasing
       // every claim even on D1 Free (50 queries/invocation).
       if (env.img_d1?.prepare && Object.keys(data).length > 5) {
@@ -95,17 +98,10 @@ export async function onRequestPost(context) {
           await withFileMutation(env, [key], async env => {
             const db = getDatabase(env);
             await assertRestoredFileSafe(db, env, metadata);
-            if (fileData.value) {
-              // 有 value 的文件（如 Telegram/Discord 分块文件）
-              await db.put(key, fileData.value, {
-                metadata
-              });
-            } else if (fileData.metadata) {
-              // 只有元数据的文件
-              await db.put(key, '', {
-                metadata
-              });
-            }
+            const indexMetadata = await prepareMetadataForStorage(metadata);
+            await db.put(key, fileData.value || '', { metadata });
+            // Still update the index if claim release fails after the write.
+            written.push({ fileId: key, metadata: indexMetadata });
           }, { requireRelease: true });
           return { success: true };
         } catch (error) {
@@ -120,6 +116,13 @@ export async function onRequestPost(context) {
         } else {
           failedCount++;
           errors.push({ key: result.key, error: result.error });
+        }
+      }
+      if (written.length) {
+        const indexed = await batchAddFilesToIndex(context, written);
+        if (!indexed.success) {
+          return jsonResponse({ success: false, error: 'File records were written but the index update could not be queued; retry this restore page',
+            writtenCount: written.length, restoredCount, failedCount }, 503);
         }
       }
     } else if (type === 'settings') {

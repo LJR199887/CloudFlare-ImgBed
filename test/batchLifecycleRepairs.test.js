@@ -6,7 +6,7 @@ import { databaseFixture } from './helpers/databaseFixture.js';
 import { createDatabaseAdapter } from '../functions/utils/databaseAdapter.js';
 import { withFileMutation } from '../functions/utils/fileMutation.js';
 import { createSession, validateSession } from '../functions/utils/auth/sessionManager.js';
-import { mergeOperationsToIndex } from '../functions/utils/indexManager.js';
+import { batchMoveFilesInIndex, batchRemoveFilesFromIndex, mergeOperationsToIndex, readIndex } from '../functions/utils/indexManager.js';
 import { onRequest as manage } from '../functions/api/manage/_middleware.js';
 import { onRequest as saveSecurity } from '../functions/api/manage/sysConfig/security.js';
 import { onRequest as apiTokens } from '../functions/api/manage/apiTokens.js';
@@ -17,6 +17,7 @@ import { onRequestPost as login } from '../functions/api/auth/adminLogin.js';
 const { onRequest: cleanup } = await import('../functions/api/manage/cleanup.js');
 const { onRequest: move } = await import('../functions/api/manage/move/[[path]].js');
 const { onRequest: remove } = await import('../functions/api/manage/delete/[[path]].js');
+const { onRequest: rename } = await import('../functions/api/manage/rename/[[path]].js');
 const origin = 'https://img.test';
 const securityKey = 'manage@sysConfig@security';
 const metadata = {Channel:'CloudflareR2',TimeStamp:1,FileName:'photo.txt'};
@@ -203,4 +204,152 @@ it('portable backups omit source version markers and legacy imports do not poiso
     dest.env.img_d1=databaseFixture(t,'D1').env.img_d1;
     await withFileMutation(dest.env,['photo.txt'],env=>createDatabaseAdapter(env).put('photo.txt','',{metadata:{...metadata,FileName:'new.txt'}}));
     assert.equal((await dest.db.getWithMetadata('photo.txt')).metadata.FileName,'new.txt');
+});
+
+it('D1 Free exports a full page of valid multipart manifests and follows the next cursor', async t => {
+    const {env,db,seed}=databaseFixture(t,'D1');
+    await db.put(securityKey,JSON.stringify({auth:{admin:{adminUsername:'admin'}},apiTokens:{tokens:{admin:{token:'fixture',permissions:['manage']}}}}));
+    const value=JSON.stringify([{index:0,fileId:'telegram-fixture',size:1}]);
+    for(let i=0;i<=1000;i++) seed(`part-${String(i).padStart(4,'0')}`,value,{Channel:'TelegramNew',TimeStamp:1,IsChunked:true,TotalChunks:1,FileSizeBytes:1});
+    const limit=budget(env.img_d1);
+    async function page(cursor='') {
+        limit.reset();
+        const r=await withManage({env,request:new Request(`${origin}/api/manage/batch/list?includeValue=true&limit=1000&cursor=${encodeURIComponent(cursor)}`,{headers:{Authorization:'Bearer fixture'}})},exportFiles);
+        assert.equal(r.status,200,await r.clone().text());assert.ok(limit.used()<=50);return r.json();
+    }
+    const first=await page();assert.equal(first.records.length,1000);assert.ok(first.records.every(record=>record.value===value));
+    const second=await page(first.nextCursor);assert.deepEqual(second.records.map(record=>record.id),['part-1000']);assert.equal(second.nextCursor,null);
+});
+
+it('a late smaller index operation is processed; an older move cannot resurrect a deleted destination', async t => {
+    const {env,db,seed}=databaseFixture(t,'D1');
+    const ids=['folder/a','folder/b','folder/c'];
+    for(const id of ids)seed(id,'',metadata);
+    await db.put('manage@index@meta',JSON.stringify({lastUpdated:1,totalCount:3,chunkCount:1,chunkSize:500,lastOperationId:'9999999999999_old'}));
+    await db.put('manage@index_0',JSON.stringify(ids.map(id=>({id,metadata}))));
+    const ctx={env,request:new Request(`${origin}/api/manage/list`),waitUntil(){}};
+    await db.delete(ids[0]);
+    await db.putIndexOperation('2000_z',{type:'batch_remove',timestamp:2000,data:{fileIds:[ids[0]]}});
+    const prepare=env.img_d1.prepare.bind(env.img_d1);
+    let appended=false;
+    env.img_d1.prepare=sql=>{
+        const statement=prepare(sql);
+        if(sql.startsWith('SELECT id, type, timestamp, data FROM index_operations')){
+            const all=statement.all.bind(statement);
+            statement.all=async()=>{
+                const result=await all();
+                if(!appended){
+                    appended=true;
+                    await db.delete(ids[1]);
+                    await db.putIndexOperation('2000_a',{type:'batch_remove',timestamp:2000,data:{fileIds:[ids[1]]}});
+                }
+                return result;
+            };
+        }
+        return statement;
+    };
+    assert.equal((await mergeOperationsToIndex(ctx)).processedOperations,1);
+    assert.equal((await mergeOperationsToIndex(ctx)).processedOperations,1);
+    assert.deepEqual(JSON.parse(await db.get('manage@index_0')).map(x=>x.id),[ids[2]]);
+    await db.delete(ids[2]);
+    await batchRemoveFilesFromIndex(ctx,['dest/c']);
+    await batchMoveFilesInIndex(ctx,[{originalFileId:ids[2],newFileId:'dest/c',metadata}]);
+    assert.equal((await mergeOperationsToIndex(ctx)).processedOperations,2);
+    assert.equal(await db.get('manage@index_0'),null);
+});
+
+it('D1 publication and acknowledgement roll back together; a concurrent merge cannot overwrite the newer snapshot', async t => {
+    const {env,db,seed}=databaseFixture(t,'D1');
+    seed('old.txt','',metadata);
+    await db.put('manage@index@meta',JSON.stringify({lastUpdated:1,totalCount:1,chunkCount:1,chunkSize:500}));
+    await db.put('manage@index_0',JSON.stringify([{id:'old.txt',metadata}]));
+    const ctx={env,request:new Request(`${origin}/api/manage/list`),waitUntil(){}};
+    await db.delete('old.txt');
+    await batchRemoveFilesFromIndex(ctx,['old.txt']);
+    const prepare=env.img_d1.prepare.bind(env.img_d1),batch=env.img_d1.batch.bind(env.img_d1);
+    let broken=true;
+    env.img_d1.prepare=sql=>{
+        const s=prepare(sql);
+        if(broken && sql.startsWith('DELETE FROM index_operations')) s.execute=()=>{throw new Error('ack unavailable');};
+        return s;
+    };
+    assert.equal((await mergeOperationsToIndex(ctx)).success,false);
+    assert.ok((await db.get('manage@index_0')).includes('old.txt'));
+    assert.equal((await db.listPendingIndexOperations(10)).length,1);
+    broken=false;
+    let winner;
+    env.img_d1.batch=async statements=>{
+        env.img_d1.batch=batch;
+        winner=await mergeOperationsToIndex(ctx);
+        return batch(statements);
+    };
+    const stale=await mergeOperationsToIndex(ctx);
+    assert.equal(winner.processedOperations,1);assert.equal(stale.success,false);assert.equal(stale.processedOperations,0);
+    assert.equal((await db.listPendingIndexOperations(10)).length,0);assert.equal(await db.get('manage@index_0'),null);
+});
+
+it('folder deletion indexes the confirmed deletion but surfaces a stranded claim to the shipped dashboard', async t => {
+    const {env,seed,db}=databaseFixture(t,'D1');
+    const id='folder/one.txt';seed(id,'',metadata);const objects=new Set([id]);
+    env.img_r2={async delete(key){objects.delete(key);}};
+    const prepare=env.img_d1.prepare.bind(env.img_d1);
+    env.img_d1.prepare=sql=>{
+        const s=prepare(sql);
+        if(sql.startsWith('DELETE FROM file_mutation_claims')) s.run=async()=>{throw new Error('release unavailable');};
+        return s;
+    };
+    const helper=await shippedFolderHelper();
+    const response=await helper(path=>withManage({env,request:new Request(origin+path),params:{path:'folder'},waitUntil(){}},remove),
+        '/api/manage/delete/folder?folder=true',{});
+    assert.equal(response.status,409);const body=await response.json();
+    assert.deepEqual(body.deleted,[id]);assert.deepEqual(body.warnings[0].ids,[id]);assert.equal(objects.size,0);
+    assert.equal((await prepare('SELECT id FROM file_mutation_claims').first()).id,id);
+    assert.equal((await db.listPendingIndexOperations(10)).length,1);
+});
+
+it('an unacknowledged R2 copy leaves the source readable and the destination claim in place', async t => {
+    const {env,seed,db}=databaseFixture(t,'D1');
+    for(const action of ['move','rename']) {
+        const source=`${action}.txt`, dest=`dest/${source}`;
+        seed(source,'',metadata);
+        const objects=new Map([[source,'original']]);
+        env.img_r2={async get(key){return objects.has(key)?{body:objects.get(key)}:null;},
+            async put(key,value){objects.set(key,value);throw new Error('copy result lost');},
+            async delete(key){objects.delete(key);}};
+        const handler=action==='move'?move:rename;
+        const context={env,request:new Request(`${origin}/api/manage/${action}/${source}?dist=dest`,{method:'POST',body:JSON.stringify({newFileId:dest})}),params:{path:source},waitUntil(){}};
+        assert.notEqual((await withManage(context,handler)).status,200);
+        assert.equal(objects.get(source),'original');assert.ok(await db.getWithMetadata(source));
+        assert.equal(objects.get(dest),'original');assert.equal(await db.getWithMetadata(dest),null);
+        const claim=await env.img_d1.prepare('SELECT id FROM file_mutation_claims WHERE id = ?').bind(dest).first();
+        assert.equal(claim.id,dest);
+    }
+});
+
+it('restore reports a failed index enqueue and a retry repairs visibility without losing the file', async t => {
+    const {env,db}=databaseFixture(t,'D1');
+    const prepare=env.img_d1.prepare.bind(env.img_d1);
+    let unavailable=true;
+    env.img_d1.prepare=sql=>{
+        const s=prepare(sql);
+        if(unavailable && sql.startsWith('INSERT OR REPLACE INTO index_operations')) s.run=async()=>{throw new Error('enqueue unavailable');};
+        return s;
+    };
+    const post=()=>restore({env,request:new Request(`${origin}/api/manage/batch/restore/chunk`,{method:'POST',body:JSON.stringify({type:'files',data:{'fixture.txt':{metadata}}})})});
+    const failed=await post();assert.equal(failed.status,503);assert.equal((await failed.json()).writtenCount,1);
+    assert.ok(await db.getWithMetadata('fixture.txt'));assert.equal((await db.listPendingIndexOperations(10)).length,0);
+    unavailable=false;
+    assert.equal((await post()).status,200);
+    await db.put('manage@index@meta',JSON.stringify({lastUpdated:1,totalCount:0,chunkCount:0,chunkSize:500}));
+    const merged=await mergeOperationsToIndex({env,request:new Request(`${origin}/api/manage/list`),waitUntil(){}});
+    assert.equal(merged.success,true);assert.equal(JSON.parse(await db.get('manage@index_0'))[0].id,'fixture.txt');
+});
+
+it('KV file restore becomes visible through the existing index without a frontend rebuild', async t => {
+    const {env,db}=databaseFixture(t,'KV');
+    await db.put('manage@index@meta',JSON.stringify({lastUpdated:1,totalCount:0,chunkCount:0,chunkSize:500}));
+    const request=new Request(`${origin}/api/manage/batch/restore/chunk`,{method:'POST',body:JSON.stringify({type:'files',data:{'fixture.txt':{metadata}}})});
+    const response=await restore({env,request});assert.equal(response.status,200);
+    const result=await readIndex({env,request:new Request(`${origin}/api/manage/list`),waitUntil(){}});
+    assert.equal(result.success,true);assert.deepEqual(result.files.map(file=>file.id),['fixture.txt']);
 });

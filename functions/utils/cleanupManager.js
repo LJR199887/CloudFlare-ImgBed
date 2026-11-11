@@ -223,7 +223,8 @@ export async function runCleanup(context, options = {}) {
                 const fileId = row.id;
                 const expected = JSON.stringify(JSON.parse(row.metadata || '{}'));
                 const cdnUrl = `${url.origin}/file/${fileId}`;
-                const ok = await deleteFile(env, fileId, cdnUrl, url, current => JSON.stringify(current.metadata) === expected);
+                const ok = await deleteFile(env, fileId, cdnUrl, url, current => JSON.stringify(current.metadata) === expected,
+                    () => { result.releaseFailures = (result.releaseFailures || 0) + 1; });
                 if (ok) {
                     result.deleted++;
                     deletedFileIds.push(fileId);

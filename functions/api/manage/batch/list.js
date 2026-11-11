@@ -90,6 +90,22 @@ export async function onRequestGet(context) {
       return errorResponse('Database list operation failed', 500);
     }
 
+    const entries = listResult.keys.filter(item => !item.name.startsWith('manage@')
+      && !item.name.startsWith('chunk_') && item.metadata?.TimeStamp);
+    const manifests = new Map();
+    if (includeValue) {
+      const ids = entries.filter(item => needsChunkManifest(item.metadata)).map(item => item.name);
+      // A full 1,000-item page needs at most 40 D1 reads, with room for
+      // authorization, the list query, and storage-channel configuration.
+      for (let i = 0; i < ids.length; i += 25) {
+        const group = ids.slice(i, i + 25);
+        const values = typeof db.getFileValues === 'function'
+          ? await db.getFileValues(group)
+          : new Map(await Promise.all(group.map(async id => [id, await db.get(id)])));
+        for (const [id, value] of values) manifests.set(id, value);
+      }
+    }
+
     // 处理记录
     const records = [];
     // A page can contain 1,000 original WebDAV records. Load shared channel
@@ -97,22 +113,7 @@ export async function onRequestGet(context) {
     let backupConfig;
     const getBackupConfig = () => backupConfig ??= loadChannelConfig(db, env, 'file backup');
     
-    for (const item of listResult.keys) {
-      // 跳过管理相关的键（以 manage@ 开头）
-      if (item.name.startsWith('manage@')) {
-        continue;
-      }
-      
-      // 跳过分块数据键（以 chunk_ 开头）
-      if (item.name.startsWith('chunk_')) {
-        continue;
-      }
-
-      // 跳过没有元数据或有效时间戳的记录
-      if (!item.metadata || !item.metadata.TimeStamp) {
-        continue;
-      }
-
+    for (const item of entries) {
       // 构建记录对象
       const record = {
         id: item.name,
@@ -124,7 +125,7 @@ export async function onRequestGet(context) {
       // 如果需要包含 value 且是分块文件，读取 value
       if (includeValue && needsChunkManifest(item.metadata)) {
         try {
-          const value = await db.get(item.name);
+          const value = manifests.get(item.name);
           parseChunkManifest(value, item.metadata);
           record.value = value;
         } catch {

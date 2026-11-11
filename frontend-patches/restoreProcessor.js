@@ -52,8 +52,10 @@ class RestoreProcessor {
     const fileEntries = Object.entries(files);
     const settingEntries = Object.entries(settings);
     const isChannelSetting = ([key]) => key.replace(/^manage@/, '') === 'sysConfig@upload';
+    const isSecuritySetting = ([key]) => key.replace(/^manage@/, '') === 'sysConfig@security';
     const channelEntries = settingEntries.filter(isChannelSetting);
-    const remainingEntries = settingEntries.filter(entry => !isChannelSetting(entry));
+    const securityEntries = settingEntries.filter(isSecuritySetting);
+    const remainingEntries = settingEntries.filter(entry => !isChannelSetting(entry) && !isSecuritySetting(entry));
 
     const totalFiles = fileEntries.length;
     const totalSettings = settingEntries.length;
@@ -63,6 +65,7 @@ class RestoreProcessor {
     let restoredSettings = 0;
     let failedFiles = 0;
     let failedSettings = 0;
+    let reauthenticationRequired = false;
 
     try {
       // 1. Restore only channel settings first: file imports validate storage identity
@@ -132,8 +135,7 @@ class RestoreProcessor {
         });
       }
 
-      // 3. Other settings (especially authentication) stay last, otherwise a
-      // fresh instance can start requiring a login before any files are restored.
+      // 3. Complete non-security settings before changing authentication.
       const remainingChunks = this.splitIntoChunks(remainingEntries, this.chunkSize);
       for (const chunk of remainingChunks) {
         if (this.aborted) {
@@ -152,6 +154,20 @@ class RestoreProcessor {
         });
       }
 
+      // Index additions were acknowledged by each file page. Do not make any
+      // further authenticated requests once this final page revokes the cookie.
+      if (securityEntries.length) {
+        if (this.aborted) throw new BatchOperationError('操作已取消', 'ABORTED', false, '');
+        if (failedFiles || failedSettings) {
+          failedSettings += securityEntries.length;
+        } else {
+          const result = await this.uploadChunkWithRetry('settings', Object.fromEntries(securityEntries));
+          restoredSettings += result.restoredCount;
+          failedSettings += result.failedCount;
+          reauthenticationRequired = result.restoredCount > 0;
+        }
+      }
+
       // 4. 完成
       this.onProgress({
         phase: 'completed',
@@ -167,6 +183,7 @@ class RestoreProcessor {
         restoredSettings,
         failedFiles,
         failedSettings,
+        reauthenticationRequired,
         backupTimestamp: backupData.timestamp
       };
 

@@ -303,7 +303,6 @@ export async function batchMoveFilesInIndex(context, moveOperations) {
  * @returns {Object} 合并结果
  */
 export async function mergeOperationsToIndex(context, options = {}) {
-    const { request } = context;
     const { cleanupAfterMerge = true } = options;
     
     try {
@@ -317,6 +316,11 @@ export async function mergeOperationsToIndex(context, options = {}) {
                 success: false,
                 error: 'Failed to get current index'
             };
+        }
+
+        const db = getDatabase(context.env);
+        if (typeof db.listPendingIndexOperations === 'function') {
+            return await mergeD1Index(context, db, currentIndex, cleanupAfterMerge);
         }
 
         // 获取所有待处理的操作
@@ -430,16 +434,10 @@ export async function mergeOperationsToIndex(context, options = {}) {
             await cleanupOperations(context, processedOperationIds);
         }
 
-        // 如果未处理完所有操作，调用 merge-operations API 递归处理
+        // Let list callers use the authoritative fallback until the next
+        // read drains the next batch. Never forward request credentials via
+        // a recursive self-fetch (which also fails for read-only tokens).
         if (!isALLOperations) {
-            console.log('There are remaining operations, will process them in subsequent calls.');
-
-            const headers = new Headers(request.headers);
-            const originUrl = new URL(request.url);
-            const mergeUrl = `${originUrl.protocol}//${originUrl.host}/api/manage/list?action=merge-operations`;
-
-            await fetch(mergeUrl, { method: 'GET', headers });
-
             return {
                 success: false,
                 error: 'There are remaining operations, will process them in subsequent calls.'
@@ -466,6 +464,36 @@ export async function mergeOperationsToIndex(context, options = {}) {
             error: error.message
         };
     }
+}
+
+async function mergeD1Index(context, db, index, cleanup) {
+    const operations = await db.listPendingIndexOperations(31);
+    const page = operations.slice(0, 30);
+    if (!page.length) return { success: true, processedOperations: 0 };
+
+    // Queue entries identify the changed IDs. Use current file records, not
+    // event order or embedded metadata: two providers can publish their queue
+    // entries in a different order from the committed file mutations.
+    const ids = new Set();
+    const add = id => { if (typeof id === 'string' && id) ids.add(id); };
+    for (const { type, data } of page) {
+        if (type === 'add' || type === 'remove') add(data.fileId);
+        else if (type === 'move') { add(data.originalFileId); add(data.newFileId); }
+        else if (type === 'batch_add') for (const file of data.files) add(file.fileId);
+        else if (type === 'batch_remove') for (const id of data.fileIds) add(id);
+        else if (type === 'batch_move') for (const move of data.operations) { add(move.originalFileId); add(move.newFileId); }
+    }
+    const affected = [...ids];
+    const files = index.files.filter(file => !ids.has(file.id));
+    for (let i = 0; i < affected.length; i += 500) {
+        files.push(...await db.getIndexFiles(affected.slice(i, i + 500)));
+    }
+    files.sort((a, b) => (b.metadata?.TimeStamp || 0) - (a.metadata?.TimeStamp || 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const saved = await saveChunkedIndex(context, {
+        ...index, files, lastUpdated: Date.now(), totalCount: files.length, lastOperationId: null,
+    }, { expected: index.snapshot, operationIds: cleanup ? page.map(op => op.id) : [] });
+    return { success: saved && operations.length <= 30, processedOperations: saved ? page.length : 0,
+        totalFiles: files.length, error: !saved ? 'Index changed during merge; retry' : operations.length > 30 ? 'Index updates remain pending' : undefined };
 }
 
 /**
@@ -518,7 +546,14 @@ export async function readIndex(context, options = {}) {
         const dirPrefix = directory === '' || directory.endsWith('/') ? directory : directory + '/';
 
         // 处理挂起的操作
-        const mergeResult = await mergeOperationsToIndex(context);
+        let mergeResult = await mergeOperationsToIndex(context);
+        // A large restore can enqueue many small, bounded pages. Make a few
+        // more passes on D1 without a self-fetch or forwarding credentials.
+        if (typeof getDatabase(context.env).listPendingIndexOperations === 'function') {
+            for (let pass = 0; pass < 3 && mergeResult.error === 'Index updates remain pending'; pass++) {
+                mergeResult = await mergeOperationsToIndex(context);
+            }
+        }
         if (!mergeResult.success) {
             throw new Error('Failed to merge operations: ' + mergeResult.error);
         }
@@ -772,6 +807,8 @@ export async function rebuildIndex(context, progressCallback = null) {
 
     try {
         console.log('Starting index rebuild...');
+        const d1Snapshot = typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function';
+        const expected = d1Snapshot ? await db.get(INDEX_META_KEY) : undefined;
         
         let cursor = null;
         let processedCount = 0;
@@ -829,7 +866,7 @@ export async function rebuildIndex(context, progressCallback = null) {
         newIndex.totalCount = newIndex.files.length;
 
         // 保存新索引（使用分块格式）
-        const saveSuccess = await saveChunkedIndex(context, newIndex);
+        const saveSuccess = await saveChunkedIndex(context, newIndex, { expected });
         if (!saveSuccess) {
             console.error('Failed to save chunked index during rebuild');
             return {
@@ -838,9 +875,9 @@ export async function rebuildIndex(context, progressCallback = null) {
             };
         }
 
-        // 清除旧的操作记录和多余索引
-        waitUntil(deleteAllOperations(context));
-        waitUntil(clearChunkedIndex(context, true));
+        // A rebuild does not own operations published while it scanned.
+        // D1 re-reads the affected file IDs when it drains these operations.
+        if (!d1Snapshot) waitUntil(clearChunkedIndex(context, true));
 
 
         console.log(`Index rebuild completed. Processed ${processedCount} files, indexed ${newIndex.totalCount} files.`);
@@ -1346,10 +1383,6 @@ async function getAllPendingOperations(context, lastOperationId = null) {
     let operationCount = 0;
 
     try {
-        if (typeof db.listPendingIndexOperations === 'function') {
-            const rows = await db.listPendingIndexOperations(lastOperationId, MAX_OPERATION_COUNT + 1);
-            return { operations: rows.slice(0, MAX_OPERATION_COUNT), isAll: rows.length <= MAX_OPERATION_COUNT };
-        }
         while (true) {
             const response = await db.list({
                 prefix: OPERATION_KEY_PREFIX,
@@ -1911,7 +1944,7 @@ async function promiseLimit(tasks, concurrency = BATCH_SIZE) {
  * @param {Object} index - 完整的索引对象
  * @returns {Promise<boolean>} 是否保存成功
  */
-async function saveChunkedIndex(context, index) {
+async function saveChunkedIndex(context, index, { expected, operationIds } = {}) {
     const { env } = context;
     const db = getDatabase(env);
     const chunkSize = getIndexChunkSize(env);
@@ -1957,6 +1990,10 @@ async function saveChunkedIndex(context, index) {
             chunkCount: chunks.length,
             chunkSize: chunkSize
         };
+
+        if (typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function') {
+            return await db.writeIndexSnapshot(metadata, chunks, expected, operationIds);
+        }
         
         await db.put(INDEX_META_KEY, JSON.stringify(metadata));
         
@@ -1988,12 +2025,14 @@ async function loadChunkedIndex(context) {
 
     try {
         // 首先获取元数据
-        const metadataStr = await db.get(INDEX_META_KEY);
+        const snapshot = typeof db.readIndexSnapshot === 'function' ? await db.readIndexSnapshot() : null;
+        const metadataStr = snapshot ? snapshot.get(INDEX_META_KEY) : await db.get(INDEX_META_KEY);
         if (!metadataStr) {
             throw new Error('Index metadata not found');
         }
         
         const metadata = JSON.parse(metadataStr);
+        if (!Number.isSafeInteger(metadata.chunkCount) || metadata.chunkCount < 0) throw new Error('Invalid index chunk count');
         const files = [];
         
         // 并行加载所有分块
@@ -2001,11 +2040,11 @@ async function loadChunkedIndex(context) {
         for (let chunkId = 0; chunkId < metadata.chunkCount; chunkId++) {
             const chunkKey = `${INDEX_KEY}_${chunkId}`;
             loadPromises.push(
-                db.get(chunkKey).then(chunkStr => {
-                    if (chunkStr) {
-                        return JSON.parse(chunkStr);
-                    }
-                    return [];
+                Promise.resolve(snapshot ? snapshot.get(chunkKey) : db.get(chunkKey)).then(chunkStr => {
+                    if (!chunkStr) throw new Error(`Missing index chunk ${chunkId}`);
+                    const chunk = JSON.parse(chunkStr);
+                    if (!Array.isArray(chunk)) throw new Error(`Invalid index chunk ${chunkId}`);
+                    return chunk;
                 })
             );
         }
@@ -2024,6 +2063,7 @@ async function loadChunkedIndex(context) {
             lastUpdated: metadata.lastUpdated,
             totalCount: metadata.totalCount,
             lastOperationId: metadata.lastOperationId,
+            snapshot: metadataStr,
             success: true
         };
         

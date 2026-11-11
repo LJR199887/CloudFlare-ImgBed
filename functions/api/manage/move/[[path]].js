@@ -186,11 +186,11 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings, canMove =
                     }
 
                     // 复制到新位置
-                    const copied = await R2DataBase.put(newFileId, object.body, {
+                    const copied = await guardProviderWrite(() => R2DataBase.put(newFileId, object.body, {
                         httpMetadata: object.httpMetadata,
                         customMetadata: object.customMetadata,
                         onlyIf: new Headers({ 'If-None-Match': '*' }),
-                    });
+                    }), () => retainClaim(newFileId));
                     if (copied === null) throw new FileMutationConflict();
                 };
 
@@ -270,7 +270,8 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings, canMove =
             await purgePublicFileListCache(url.origin, normalizedFolder, normalizedDist);
 
             return true;
-        });
+        }, { onReleaseFailure: ids => warnings.push({ fileId, newFileId, ids,
+            message: 'File move finished but claim release could not be verified; reconcile before reusing the names' }) });
     } catch (e) {
         console.error('Move file failed:', e);
         return false;

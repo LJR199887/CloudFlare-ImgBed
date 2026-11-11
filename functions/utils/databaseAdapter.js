@@ -51,6 +51,20 @@ class KVAdapter {
         return await this.kv.get(key, options);
     }
 
+    async getFileValues(ids) {
+        if (ids.length === 1) return new Map([[ids[0], await this.get(ids[0])]]);
+        try {
+            const values = await this.kv.get(ids);
+            if (values instanceof Map) return values;
+        } catch (error) {
+            // Split oversized responses; older emulators may only support a
+            // single key. Do not turn outages into a burst of scalar reads.
+            if (!(error instanceof TypeError) && error.status !== 413 && !/\b413\b/.test(error.message)) throw error;
+        }
+        const mid = Math.ceil(ids.length / 2);
+        return new Map([...await this.getFileValues(ids.slice(0, mid)), ...await this.getFileValues(ids.slice(mid))]);
+    }
+
     async getWithMetadata(key, options) {
         options = options || {};
         return await this.kv.getWithMetadata(key, options);
