@@ -17,7 +17,14 @@ export function applyDownloadPolicy(headers, fileType, encodedName = 'download')
     headers.set('Content-Type', inline ? safeType : 'application/octet-stream');
     headers.set('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${encodedName}"; filename*=UTF-8''${encodedName}`);
     headers.set('X-Content-Type-Options', 'nosniff');
-    headers.set('Content-Security-Policy', "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
+    // A top-level audio/video navigation creates a browser media document that
+    // fetches the media URL again. `default-src 'none'` blocked that request,
+    // leaving the native player black at 0:00. Keep all non-media downloads
+    // sandboxed; known passive media still cannot load scripts or other assets.
+    const media = inline && (/^audio\//.test(type) || /^video\//.test(type));
+    headers.set('Content-Security-Policy', media
+        ? "default-src 'none'; media-src 'self' blob:; base-uri 'none'; form-action 'none'"
+        : "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
 }
 
 // Never copy Cookie, Authorization, Host, Referer or custom application headers.

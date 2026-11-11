@@ -47,6 +47,12 @@ describe('browser and provider trust boundaries', () => {
         for (const type of ['image/png', 'audio/mpeg', 'video/mp4', 'text/plain; charset=UTF-8']) {
             const h = new Headers(); applyDownloadPolicy(h, type, 'safe');
             assert.match(h.get('Content-Disposition'), /^inline;/); assert.equal(h.get('Content-Type'), type);
+            if (type.startsWith('video/') || type.startsWith('audio/')) {
+                assert.match(h.get('Content-Security-Policy'), /media-src 'self'/);
+                assert.doesNotMatch(h.get('Content-Security-Policy'), /\bsandbox\b/);
+            } else {
+                assert.match(h.get('Content-Security-Policy'), /\bsandbox\b/);
+            }
         }
     });
     it('handles single Telegram downloads without passing credentials in either direction', async t => {
