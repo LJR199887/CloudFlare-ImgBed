@@ -10,6 +10,7 @@ import { getDatabase, checkDatabaseConfig } from '../../../../utils/databaseAdap
 import { stripSensitiveMetadata } from '../../../../utils/metadata/metadataSecurity.js';
 import { readKVMutationStates, compactKVMutationStates,
   matchesKVMutationStates } from '../../../../utils/kvIndexMutationState.js';
+import { newKVIndexChunkPrefix, kvIndexChunkKey, pruneKVIndexChunks } from '../../../../utils/kvIndexChunks.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -20,7 +21,6 @@ const corsHeaders = {
 };
 
 // 索引存储键
-const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta';
 // D1 单字段限制 2MB，KV 限制 25MB，根据数据库类型动态设置
 const INDEX_CHUNK_SIZE_D1 = 500; // D1 数据库分块大小
@@ -223,7 +223,7 @@ async function verifyKVFiles(db, files) {
  * @param {Object} env - 环境变量
  * @returns {Promise<{success: boolean, metadata?: Object, error?: string}>}
  */
-async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = [], mutationStates = []) {
+async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = [], mutationStates = [], waitUntil, expectedKV) {
   try {
     files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
@@ -275,15 +275,19 @@ async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOp
       return { success: true, metadata };
     }
 
-    await db.put(INDEX_META_KEY, JSON.stringify(metadata));
-
-    // 保存各个分块
+    metadata.chunkPrefix = newKVIndexChunkPrefix();
+    // Publish the manifest only after all immutable chunks exist.
     const savePromises = chunks.map((chunk, chunkId) => {
-      const chunkKey = `${INDEX_KEY}_${chunkId}`;
+      const chunkKey = kvIndexChunkKey(metadata, chunkId);
       return db.put(chunkKey, JSON.stringify(chunk));
     });
 
     await Promise.all(savePromises);
+    if (await db.get(INDEX_META_KEY) !== expectedKV) {
+      return { success: false, conflict: true, error: 'KV index changed during publication; retry' };
+    }
+    await db.put(INDEX_META_KEY, JSON.stringify(metadata));
+    if (typeof waitUntil === 'function') waitUntil(pruneKVIndexChunks(db, metadata.chunkPrefix));
 
     console.log(`Saved index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
 
@@ -410,7 +414,7 @@ export async function onRequestPost(context) {
     }
 
     // 保存新索引
-    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds, mutationStates);
+    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds, mutationStates, context.waitUntil, oldMeta);
     if (!saveResult.success) {
       return errorResponse('Failed to save index', saveResult.conflict ? 409 : 500, saveResult.error);
     }

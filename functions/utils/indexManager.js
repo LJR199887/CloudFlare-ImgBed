@@ -11,11 +11,13 @@
  *     totalCount: 1000,
  *     lastOperationId: "operation_timestamp_uuid",
  *     chunkCount: 3,
- *     chunkSize: 10000
+ *     chunkSize: 10000,
+ *     chunkPrefix: "manage@index_snapshot_<timestamp>_<uuid>_" // KV only
  *   }
  * 
  * 索引分块：
- * - key: manage@index_${chunkId} (例如: manage@index_0, manage@index_1, ...)
+ * - KV key: ${chunkPrefix}${chunkId}; legacy indexes use manage@index_${chunkId}
+ * - D1 key: manage@index_${chunkId}
  * - value: JSON.stringify(filesChunk)
  * - filesChunk: [
  *     {
@@ -41,6 +43,7 @@ import { getDatabase, checkDatabaseConfig } from './databaseAdapter.js';
 import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
 import { readKVMutationStates, shouldApplyKVMutation, noteKVMutation,
     compactKVMutationStates, matchesKVMutationStates } from './kvIndexMutationState.js';
+import { newKVIndexChunkPrefix, kvIndexChunkKey, pruneKVIndexChunks } from './kvIndexChunks.js';
 
 const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
@@ -394,12 +397,34 @@ export async function mergeOperationsToIndex(context, options = {}) {
                         break;
                         
                     case 'move':
-                        if (eligible(operation.data.originalFileId, false)
-                            && eligible(operation.data.newFileId, true)) {
-                            if (applyMoveOperation(workingIndex, operation.data)) movedCount++;
-                            mark(operation.data.originalFileId, false);
-                            mark(operation.data.newFileId, true);
+                        const moveSource = workingIndex.files.find(file => file.id === operation.data.originalFileId);
+                        if (operation.data.originalFileId === operation.data.newFileId) {
+                            if (eligible(operation.data.newFileId, true)) {
+                                applyAddOperation(workingIndex, {
+                                    fileId: operation.data.newFileId,
+                                    metadata: operation.data.metadata || moveSource?.metadata
+                                });
+                                mark(operation.data.newFileId, true);
+                                movedCount++;
+                            }
+                            break;
                         }
+                        let moveApplied = false;
+                        if (eligible(operation.data.originalFileId, false)) {
+                            applyRemoveOperation(workingIndex, { fileId: operation.data.originalFileId });
+                            mark(operation.data.originalFileId, false);
+                            moveApplied = true;
+                        }
+                        if (eligible(operation.data.newFileId, true)) {
+                            applyRemoveOperation(workingIndex, { fileId: operation.data.newFileId });
+                            applyAddOperation(workingIndex, {
+                                fileId: operation.data.newFileId,
+                                metadata: operation.data.metadata || moveSource?.metadata
+                            });
+                            mark(operation.data.newFileId, true);
+                            moveApplied = true;
+                        }
+                        if (moveApplied) movedCount++;
                         break;
                         
                     case 'batch_add':
@@ -417,12 +442,33 @@ export async function mergeOperationsToIndex(context, options = {}) {
                         break;
                         
                     case 'batch_move':
-                        const moves = operation.data.operations.filter(move =>
-                            eligible(move.originalFileId, false) && eligible(move.newFileId, true));
-                        movedCount += applyBatchMoveOperation(workingIndex, { operations: moves });
-                        for (const move of moves) {
-                            mark(move.originalFileId, false);
-                            mark(move.newFileId, true);
+                        for (const move of operation.data.operations) {
+                            const source = workingIndex.files.find(file => file.id === move.originalFileId);
+                            if (move.originalFileId === move.newFileId) {
+                                if (eligible(move.newFileId, true)) {
+                                    applyAddOperation(workingIndex, {
+                                        fileId: move.newFileId, metadata: move.metadata || source?.metadata
+                                    });
+                                    mark(move.newFileId, true);
+                                    movedCount++;
+                                }
+                                continue;
+                            }
+                            let applied = false;
+                            if (eligible(move.originalFileId, false)) {
+                                applyRemoveOperation(workingIndex, { fileId: move.originalFileId });
+                                mark(move.originalFileId, false);
+                                applied = true;
+                            }
+                            if (eligible(move.newFileId, true)) {
+                                applyRemoveOperation(workingIndex, { fileId: move.newFileId });
+                                applyAddOperation(workingIndex, {
+                                    fileId: move.newFileId, metadata: move.metadata || source?.metadata
+                                });
+                                mark(move.newFileId, true);
+                                applied = true;
+                            }
+                            if (applied) movedCount++;
                         }
                         break;
                         
@@ -460,7 +506,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
             workingIndex.mutationStates = compactKVMutationStates(mutationStates);
 
             // 保存更新后的索引（使用分块格式）
-            const saveSuccess = await saveChunkedIndex(context, workingIndex);
+            const saveSuccess = await saveChunkedIndex(context, workingIndex, { expected: currentIndex.snapshot });
             if (!saveSuccess) {
                 console.error('Failed to save chunked index');
                 return {
@@ -863,13 +909,13 @@ export async function readIndex(context, options = {}) {
  * @param {Function} progressCallback - 进度回调函数
  */
 export async function rebuildIndex(context, progressCallback = null) {
-    const { env, waitUntil } = context;
+    const { env } = context;
     const db = getDatabase(env);
 
     try {
         console.log('Starting index rebuild...');
         const d1Snapshot = typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function';
-        const expected = d1Snapshot ? await db.get(INDEX_META_KEY) : undefined;
+        const expected = await db.get(INDEX_META_KEY);
         
         let cursor = null;
         let processedCount = 0;
@@ -880,7 +926,7 @@ export async function rebuildIndex(context, progressCallback = null) {
             lastOperationId: null
         };
         if (!d1Snapshot) {
-            const oldMeta = await db.get(INDEX_META_KEY);
+            const oldMeta = expected;
             if (oldMeta) {
                 let previous = null;
                 try {
@@ -954,9 +1000,8 @@ export async function rebuildIndex(context, progressCallback = null) {
             };
         }
 
-        // A rebuild does not own operations published while it scanned.
-        // D1 re-reads the affected file IDs when it drains these operations.
-        if (!d1Snapshot) waitUntil(clearChunkedIndex(context, true));
+        // Do not delete older KV generations here: another location can still
+        // see their manifest. The age-gated snapshot pruner runs after publish.
 
 
         console.log(`Index rebuild completed. Processed ${processedCount} files, indexed ${newIndex.totalCount} files.`);
@@ -1408,8 +1453,13 @@ export async function getIndexMeta(context) {
 /**
  * 生成唯一的操作ID
  */
-function generateOperationId() {
-    const timestamp = Date.now();
+let lastRecordedOperationTimestamp = 0;
+function nextOperationTimestamp() {
+    lastRecordedOperationTimestamp = Math.max(Date.now(), lastRecordedOperationTimestamp + 1);
+    return lastRecordedOperationTimestamp;
+}
+
+function generateOperationId(timestamp) {
     const random = Math.random().toString(36).substring(2, 9);
     return `${timestamp}_${random}`;
 }
@@ -1424,10 +1474,13 @@ async function recordOperation(context, type, data) {
     const { env } = context;
     const db = getDatabase(env);
 
-    const operationId = generateOperationId();
+    // Date.now() alone gives identical timestamps to sequential mutations in
+    // one isolate. Keep their recorded causal order even within one millisecond.
+    const timestamp = nextOperationTimestamp();
+    const operationId = generateOperationId(timestamp);
     const operation = {
         type,
-        timestamp: Date.now(),
+        timestamp,
         data: sanitizeOperationData(data)
     };
     
@@ -1542,22 +1595,6 @@ function applyRemoveOperation(index, data) {
 }
 
 /**
- * 应用移动操作
- * @param {Object} index - 索引对象
- * @param {Object} data - 操作数据
- */
-function applyMoveOperation(index, data) {
-    const { originalFileId, newFileId, metadata } = data;
-    const original = index.files.find(file => file.id === originalFileId);
-    // A move can become visible before the source's add operation in KV.
-    // Its event already contains the destination metadata, so upsert the
-    // destination even when the old index never saw the source.
-    index.files = index.files.filter(file => file.id !== originalFileId && file.id !== newFileId);
-    insertFileInOrder(index.files, { id: newFileId, metadata: metadata || original?.metadata || {} });
-    return true;
-}
-
-/**
  * 应用批量添加操作
  * @param {Object} index - 索引对象
  * @param {Object} data - 操作数据
@@ -1618,20 +1655,6 @@ function applyBatchRemoveOperation(index, data) {
     index.files = index.files.filter(file => !fileIdSet.has(file.id));
     
     return initialLength - index.files.length;
-}
-
-/**
- * 应用批量移动操作
- * @param {Object} index - 索引对象
- * @param {Object} data - 操作数据
- */
-function applyBatchMoveOperation(index, data) {
-    const { operations } = data;
-    let movedCount = 0;
-    for (const operation of operations) {
-        if (applyMoveOperation(index, operation)) movedCount++;
-    }
-    return movedCount;
 }
 
 /**
@@ -2042,16 +2065,23 @@ async function saveChunkedIndex(context, index, { expected, operationIds } = {})
         if (typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function') {
             return await db.writeIndexSnapshot(metadata, chunks, expected, operationIds);
         }
-        
-        await db.put(INDEX_META_KEY, JSON.stringify(metadata));
-        
-        // 保存各个分块
+
+        // KV has no multi-key transaction. Publish immutable chunks first and
+        // switch the manifest last so a reader never combines a new receipt
+        // list with chunks from the previous generation.
+        metadata.chunkPrefix = newKVIndexChunkPrefix();
         const savePromises = chunks.map((chunk, chunkId) => {
-            const chunkKey = `${INDEX_KEY}_${chunkId}`;
+            const chunkKey = kvIndexChunkKey(metadata, chunkId);
             return db.put(chunkKey, JSON.stringify(chunk));
         });
-        
         await Promise.all(savePromises);
+        if (expected !== undefined && await db.get(INDEX_META_KEY) !== expected) {
+            return false;
+        }
+        await db.put(INDEX_META_KEY, JSON.stringify(metadata));
+        if (typeof context.waitUntil === 'function') {
+            context.waitUntil(pruneKVIndexChunks(db, metadata.chunkPrefix));
+        }
         
         console.log(`Saved chunked index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
         return true;
@@ -2086,7 +2116,7 @@ async function loadChunkedIndex(context) {
         // 并行加载所有分块
         const loadPromises = [];
         for (let chunkId = 0; chunkId < metadata.chunkCount; chunkId++) {
-            const chunkKey = `${INDEX_KEY}_${chunkId}`;
+            const chunkKey = kvIndexChunkKey(metadata, chunkId);
             loadPromises.push(
                 Promise.resolve(snapshot ? snapshot.get(chunkKey) : db.get(chunkKey)).then(chunkStr => {
                     if (!chunkStr) throw new Error(`Missing index chunk ${chunkId}`);
@@ -2149,9 +2179,11 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
         // 获取元数据
         const metadataStr = await db.get(INDEX_META_KEY);
         let chunkCount = 0;
+        let indexMetadata = null;
         
         if (metadataStr) {
             const metadata = JSON.parse(metadataStr);
+            indexMetadata = metadata;
             chunkCount = metadata.chunkCount || 0;
 
             if (!onlyNonUsed) {
@@ -2182,7 +2214,7 @@ export async function clearChunkedIndex(context, onlyNonUsed = false) {
         if (onlyNonUsed) {
             // 如果仅清理未使用的分块索引，保留当前在使用的分块
             for (let chunkId = 0; chunkId < chunkCount; chunkId++) {
-                reservedChunks.push(`${INDEX_KEY}_${chunkId}`);
+                reservedChunks.push(kvIndexChunkKey(indexMetadata, chunkId));
             }
         }
 
@@ -2240,7 +2272,7 @@ export async function getIndexStorageStats(context) {
         // 检查各个分块的存在情况
         const chunkChecks = [];
         for (let chunkId = 0; chunkId < metadata.chunkCount; chunkId++) {
-            const chunkKey = `${INDEX_KEY}_${chunkId}`;
+            const chunkKey = kvIndexChunkKey(metadata, chunkId);
             chunkChecks.push(
                 db.get(chunkKey).then(data => ({
                     chunkId,
