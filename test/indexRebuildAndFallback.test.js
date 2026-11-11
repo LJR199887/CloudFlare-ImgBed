@@ -67,6 +67,75 @@ it('KV does not replay an acknowledged operation that reappears at another edge'
     assert.deepEqual((await list(ctx).then(r => r.json())).files, []);
 });
 
+it('KV rejects an older add first observed after a newer delete', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    await db.putIndexOperation('200_z', { type: 'remove', timestamp: 200, data: { fileId: 'gone.png' } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    await db.putIndexOperation('100_z', { type: 'add', timestamp: 100, data: { fileId: 'gone.png', metadata } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.deepEqual((await list(ctx).then(r => r.json())).files, []);
+    seed('gone.png', '', metadata);
+    await db.putIndexOperation('300_z', { type: 'add', timestamp: 300, data: { fileId: 'gone.png', metadata } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.deepEqual((await list(ctx).then(r => r.json())).files.map(file => file.name), ['gone.png']);
+});
+
+it('KV rejects a late older move into an already deleted destination', async t => {
+    const { env, db } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 1, chunkCount: 1, chunkSize: 5000 }));
+    await db.put('manage@index_0', JSON.stringify([{ id: 'source.png', metadata }]));
+    await db.putIndexOperation('200_z', { type: 'remove', timestamp: 200, data: { fileId: 'dest.png' } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    await db.putIndexOperation('100_z', { type: 'move', timestamp: 100,
+        data: { originalFileId: 'source.png', newFileId: 'dest.png', metadata } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.deepEqual((await list(ctx).then(r => r.json())).files.map(file => file.name), ['source.png']);
+});
+
+it('KV manual rebuild rejects matching stale list and get after an acknowledged deletion', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    seed('gone.png', '', metadata);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    await db.put('chunk_stale_both_0', JSON.stringify({ data: [{ id: 'gone.png', metadata }] }));
+    await db.delete('gone.png');
+    await db.putIndexOperation('200_z', { type: 'remove', timestamp: 200, data: { fileId: 'gone.png' } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    const listFiles = env.img_url.list.bind(env.img_url);
+    const getFile = env.img_url.getWithMetadata.bind(env.img_url);
+    env.img_url.list = async options => {
+        const result = await listFiles(options);
+        if (!options.prefix) result.keys.push({ name: 'gone.png', metadata });
+        return result;
+    };
+    env.img_url.getWithMetadata = async key => key === 'gone.png'
+        ? { value: '', metadata } : getFile(key);
+    const response = await post(env, { sessionId: 'stale_both', totalChunks: 1, totalFiles: 1 });
+    assert.equal(response.status, 409, await response.clone().text());
+    assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 0);
+});
+
+it('KV manual rebuild rejects mutually stale omission after an acknowledged upload', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    seed('new.png', '', metadata);
+    await db.putIndexOperation('200_z', { type: 'add', timestamp: 200, data: { fileId: 'new.png', metadata } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    const listFiles = env.img_url.list.bind(env.img_url);
+    env.img_url.list = async options => {
+        const result = await listFiles(options);
+        if (!options.prefix) result.keys = result.keys.filter(key => key.name !== 'new.png');
+        return result;
+    };
+    const response = await post(env, { sessionId: 'stale_empty', totalChunks: 0, totalFiles: 0 });
+    assert.equal(response.status, 409, await response.clone().text());
+    assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 1);
+});
+
 it('KV pending-operation list errors do not report a successful empty merge', async t => {
     const { env, db } = databaseFixture(t, 'KV');
     await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));

@@ -39,6 +39,8 @@
 
 import { getDatabase, checkDatabaseConfig } from './databaseAdapter.js';
 import { stripSensitiveMetadata } from './metadata/metadataSecurity.js';
+import { readKVMutationStates, shouldApplyKVMutation, noteKVMutation,
+    compactKVMutationStates, matchesKVMutationStates } from './kvIndexMutationState.js';
 
 const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta'; // 索引元数据键
@@ -360,6 +362,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
         // bounded exact-ID receipt list, not a lexicographic high-water mark:
         // a genuinely new same-millisecond ID may sort before the old one.
         const appliedOperationIds = new Set(currentIndex.appliedOperationIds || []);
+        const mutationStates = readKVMutationStates(currentIndex);
 
         // 应用每个操作
         for (const operation of operations) {
@@ -368,37 +371,59 @@ export async function mergeOperationsToIndex(context, options = {}) {
                     processedOperationIds.push(operation.id);
                     continue;
                 }
+                if (!Number.isFinite(operation.timestamp)) throw new Error('Invalid operation timestamp');
+                const t = operation.timestamp;
+                const eligible = (id, present) => typeof id === 'string' && id
+                    && shouldApplyKVMutation(mutationStates, id, t, present);
+                const mark = (id, present) => noteKVMutation(mutationStates, id, t, present);
                 switch (operation.type) {
                     case 'add':
-                        const addResult = applyAddOperation(workingIndex, operation.data);
-                        if (addResult.added) addedCount++;
-                        if (addResult.updated) updatedCount++;
+                        if (eligible(operation.data.fileId, true)) {
+                            const addResult = applyAddOperation(workingIndex, operation.data);
+                            if (addResult.added) addedCount++;
+                            if (addResult.updated) updatedCount++;
+                            mark(operation.data.fileId, true);
+                        }
                         break;
                         
                     case 'remove':
-                        if (applyRemoveOperation(workingIndex, operation.data)) {
-                            removedCount++;
+                        if (eligible(operation.data.fileId, false)) {
+                            if (applyRemoveOperation(workingIndex, operation.data)) removedCount++;
+                            mark(operation.data.fileId, false);
                         }
                         break;
                         
                     case 'move':
-                        if (applyMoveOperation(workingIndex, operation.data)) {
-                            movedCount++;
+                        if (eligible(operation.data.originalFileId, false)
+                            && eligible(operation.data.newFileId, true)) {
+                            if (applyMoveOperation(workingIndex, operation.data)) movedCount++;
+                            mark(operation.data.originalFileId, false);
+                            mark(operation.data.newFileId, true);
                         }
                         break;
                         
                     case 'batch_add':
-                        const batchAddResult = applyBatchAddOperation(workingIndex, operation.data);
+                        const files = operation.data.files.filter(file => eligible(file.fileId, true));
+                        const batchAddResult = applyBatchAddOperation(workingIndex, { ...operation.data, files });
                         addedCount += batchAddResult.addedCount;
                         updatedCount += batchAddResult.updatedCount;
+                        for (const file of files) mark(file.fileId, true);
                         break;
                         
                     case 'batch_remove':
-                        removedCount += applyBatchRemoveOperation(workingIndex, operation.data);
+                        const fileIds = operation.data.fileIds.filter(id => eligible(id, false));
+                        removedCount += applyBatchRemoveOperation(workingIndex, { fileIds });
+                        for (const id of fileIds) mark(id, false);
                         break;
                         
                     case 'batch_move':
-                        movedCount += applyBatchMoveOperation(workingIndex, operation.data);
+                        const moves = operation.data.operations.filter(move =>
+                            eligible(move.originalFileId, false) && eligible(move.newFileId, true));
+                        movedCount += applyBatchMoveOperation(workingIndex, { operations: moves });
+                        for (const move of moves) {
+                            mark(move.originalFileId, false);
+                            mark(move.newFileId, true);
+                        }
                         break;
                         
                     default:
@@ -432,6 +457,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
             
             workingIndex.lastOperationId = null;
             workingIndex.appliedOperationIds = [...appliedOperationIds].slice(-10000);
+            workingIndex.mutationStates = compactKVMutationStates(mutationStates);
 
             // 保存更新后的索引（使用分块格式）
             const saveSuccess = await saveChunkedIndex(context, workingIndex);
@@ -856,10 +882,15 @@ export async function rebuildIndex(context, progressCallback = null) {
         if (!d1Snapshot) {
             const oldMeta = await db.get(INDEX_META_KEY);
             if (oldMeta) {
+                let previous = null;
                 try {
-                    const ids = JSON.parse(oldMeta).appliedOperationIds;
-                    if (Array.isArray(ids)) newIndex.appliedOperationIds = ids.slice(-10000);
+                    previous = JSON.parse(oldMeta);
                 } catch (_) { /* A corrupt old index must not block repair. */ }
+                if (previous) {
+                    const ids = previous.appliedOperationIds;
+                    if (Array.isArray(ids)) newIndex.appliedOperationIds = ids.slice(-10000);
+                    newIndex.mutationStates = compactKVMutationStates(readKVMutationStates(previous));
+                }
             }
         }
 
@@ -908,6 +939,10 @@ export async function rebuildIndex(context, progressCallback = null) {
         newIndex.files.sort((a, b) => b.metadata.TimeStamp - a.metadata.TimeStamp);
 
         newIndex.totalCount = newIndex.files.length;
+        if (!d1Snapshot && !matchesKVMutationStates(newIndex.files,
+            readKVMutationStates(newIndex))) {
+            return { success: false, error: 'KV file listing conflicts with recent index mutations; retry later' };
+        }
 
         // 保存新索引（使用分块格式）
         const saveSuccess = await saveChunkedIndex(context, newIndex, { expected });
@@ -2027,7 +2062,8 @@ async function saveChunkedIndex(context, index, { expected, operationIds } = {})
             channelStats,
             lastOperationId: index.lastOperationId,
             ...(typeof db.listPendingIndexOperations !== 'function'
-                ? { appliedOperationIds: (index.appliedOperationIds || []).slice(-10000) } : {}),
+                ? { appliedOperationIds: (index.appliedOperationIds || []).slice(-10000),
+                    mutationStates: compactKVMutationStates(readKVMutationStates(index)) } : {}),
             chunkCount: chunks.length,
             chunkSize: chunkSize
         };
@@ -2105,6 +2141,7 @@ async function loadChunkedIndex(context) {
             totalCount: metadata.totalCount,
             lastOperationId: metadata.lastOperationId,
             appliedOperationIds: Array.isArray(metadata.appliedOperationIds) ? metadata.appliedOperationIds : [],
+            mutationStates: Array.isArray(metadata.mutationStates) ? metadata.mutationStates : [],
             snapshot: metadataStr,
             success: true
         };

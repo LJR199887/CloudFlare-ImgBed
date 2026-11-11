@@ -8,6 +8,8 @@
 
 import { getDatabase, checkDatabaseConfig } from '../../../../utils/databaseAdapter.js';
 import { stripSensitiveMetadata } from '../../../../utils/metadata/metadataSecurity.js';
+import { readKVMutationStates, compactKVMutationStates,
+  matchesKVMutationStates } from '../../../../utils/kvIndexMutationState.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -221,7 +223,7 @@ async function verifyKVFiles(db, files) {
  * @param {Object} env - 环境变量
  * @returns {Promise<{success: boolean, metadata?: Object, error?: string}>}
  */
-async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = []) {
+async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = [], mutationStates = []) {
   try {
     files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
@@ -261,7 +263,7 @@ async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOp
       totalSizeMB: Math.round(totalSizeMB * 100) / 100,
       channelStats,
       lastOperationId: null, // 重建后清除操作 ID
-      ...(expected === undefined ? { appliedOperationIds: appliedOperationIds.slice(-10000) } : {}),
+      ...(expected === undefined ? { appliedOperationIds: appliedOperationIds.slice(-10000), mutationStates } : {}),
       chunkCount: chunks.length,
       chunkSize: chunkSize,
     };
@@ -349,11 +351,17 @@ export async function onRequestPost(context) {
     const expected = atomic ? await db.get(INDEX_META_KEY) : undefined;
     const oldMeta = !atomic ? await db.get(INDEX_META_KEY) : null;
     let appliedOperationIds = [];
+    let mutationStates = [];
     if (oldMeta) {
+      let previous = null;
       try {
-        const ids = JSON.parse(oldMeta).appliedOperationIds;
-        if (Array.isArray(ids)) appliedOperationIds = ids.filter(id => typeof id === 'string').slice(-10000);
+        previous = JSON.parse(oldMeta);
       } catch (_) { /* Rebuilds also repair corrupt metadata. */ }
+      if (previous) {
+        const ids = previous.appliedOperationIds;
+        if (Array.isArray(ids)) appliedOperationIds = ids.filter(id => typeof id === 'string').slice(-10000);
+        mutationStates = compactKVMutationStates(readKVMutationStates(previous));
+      }
     }
 
     if (atomic) {
@@ -381,6 +389,9 @@ export async function onRequestPost(context) {
     if (!chunksResult.success) return errorResponse('Failed to read chunks', 400, chunksResult.error);
     const allFiles = await readCanonicalFiles(db);
     await verifyKVFiles(db, allFiles);
+    if (!matchesKVMutationStates(allFiles, readKVMutationStates({ mutationStates }))) {
+      return errorResponse('KV listing conflicts with recent index mutations; retry after propagation', 409);
+    }
     // If the client scan and server scan disagree, the KV view is unstable.
     // Do not publish either snapshot or consume the staging session.
     const currentIds = new Set(allFiles.map(file => file.id));
@@ -394,9 +405,12 @@ export async function onRequestPost(context) {
       return errorResponse('KV file count changed while rebuilding; retry', 409,
         `Expected ${totalFiles}, found ${allFiles.length}`);
     }
+    if (await db.get(INDEX_META_KEY) !== oldMeta) {
+      return errorResponse('KV index changed while rebuilding; retry', 409);
+    }
 
     // 保存新索引
-    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds);
+    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds, mutationStates);
     if (!saveResult.success) {
       return errorResponse('Failed to save index', saveResult.conflict ? 409 : 500, saveResult.error);
     }
