@@ -1548,18 +1548,12 @@ function applyRemoveOperation(index, data) {
  */
 function applyMoveOperation(index, data) {
     const { originalFileId, newFileId, metadata } = data;
-    
-    const originalIndex = index.files.findIndex(file => file.id === originalFileId);
-    if (originalIndex === -1) {
-        return false; // 原文件不存在
-    }
-    
-    // 更新文件ID和元数据
-    index.files[originalIndex] = {
-        id: newFileId,
-        metadata: metadata || index.files[originalIndex].metadata
-    };
-    
+    const original = index.files.find(file => file.id === originalFileId);
+    // A move can become visible before the source's add operation in KV.
+    // Its event already contains the destination metadata, so upsert the
+    // destination even when the old index never saw the source.
+    index.files = index.files.filter(file => file.id !== originalFileId && file.id !== newFileId);
+    insertFileInOrder(index.files, { id: newFileId, metadata: metadata || original?.metadata || {} });
     return true;
 }
 
@@ -1634,32 +1628,9 @@ function applyBatchRemoveOperation(index, data) {
 function applyBatchMoveOperation(index, data) {
     const { operations } = data;
     let movedCount = 0;
-    
-    // 创建现有文件ID的映射以提高查找效率
-    const existingFilesMap = new Map();
-    index.files.forEach((file, idx) => {
-        existingFilesMap.set(file.id, idx);
-    });
-    
     for (const operation of operations) {
-        const { originalFileId, newFileId, metadata } = operation;
-        
-        const originalIndex = existingFilesMap.get(originalFileId);
-        if (originalIndex !== undefined) {
-            // 更新映射
-            existingFilesMap.delete(originalFileId);
-            existingFilesMap.set(newFileId, originalIndex);
-            
-            // 更新文件信息
-            index.files[originalIndex] = {
-                id: newFileId,
-                metadata: metadata || index.files[originalIndex].metadata
-            };
-            
-            movedCount++;
-        }
+        if (applyMoveOperation(index, operation)) movedCount++;
     }
-    
     return movedCount;
 }
 

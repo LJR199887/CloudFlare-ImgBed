@@ -95,6 +95,21 @@ it('KV rejects a late older move into an already deleted destination', async t =
     assert.deepEqual((await list(ctx).then(r => r.json())).files.map(file => file.name), ['source.png']);
 });
 
+it('KV indexes a move that becomes visible before the source add', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    const moved = { ...metadata, FileName: 'dest.png' };
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    seed('dest.png', '', moved);
+    await db.putIndexOperation('200_z', { type: 'move', timestamp: 200,
+        data: { originalFileId: 'source.png', newFileId: 'dest.png', metadata: moved } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    await db.putIndexOperation('100_z', { type: 'add', timestamp: 100,
+        data: { fileId: 'source.png', metadata } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.deepEqual((await list(ctx).then(r => r.json())).files.map(file => file.name), ['dest.png']);
+});
+
 it('KV manual rebuild rejects matching stale list and get after an acknowledged deletion', async t => {
     const { env, db, seed } = databaseFixture(t, 'KV');
     const ctx = context(env);
