@@ -70,6 +70,31 @@ class KVAdapter {
         return await this.kv.getWithMetadata(key, options);
     }
 
+    async getIndexFiles(ids) {
+        if (!ids.length) return [];
+        if (ids.length > 100) {
+            const mid = Math.ceil(ids.length / 2);
+            return [...await this.getIndexFiles(ids.slice(0, mid)), ...await this.getIndexFiles(ids.slice(mid))];
+        }
+        if (ids.length === 1) {
+            const record = await this.getWithMetadata(ids[0]);
+            return record?.metadata ? [{ id: ids[0], metadata: record.metadata }] : [];
+        }
+        try {
+            const records = await this.kv.getWithMetadata(ids);
+            if (records instanceof Map) return ids.flatMap(id => {
+                const record = records.get(id);
+                return record?.metadata ? [{ id, metadata: record.metadata }] : [];
+            });
+        } catch (error) {
+            if (!(error instanceof TypeError) && error.status !== 413 && !/\b413\b/.test(error.message)) throw error;
+        }
+        // Older emulators only accept scalar keys; large bulk responses can
+        // also exceed KV's 25 MiB limit. Split without suppressing real errors.
+        const mid = Math.ceil(ids.length / 2);
+        return [...await this.getIndexFiles(ids.slice(0, mid)), ...await this.getIndexFiles(ids.slice(mid))];
+    }
+
     async delete(key, options) {
         options = options || {};
         return await this.kv.delete(key, options);

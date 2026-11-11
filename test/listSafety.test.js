@@ -10,9 +10,9 @@ describe('management list credential redaction', () => {
         it(`redacts legacy credentials in ${fallback ? 'database fallback' : 'index'} responses`, async () => {
             const route = await loadFunction('functions/api/manage/list.js', {
                 stripSensitiveMetadata,
-                readIndex: async () => fallback
+                readIndex: async (_context, options) => fallback && !options.sourceFiles
                     ? { success: false }
-                    : { success: true, files: [{ id: 'photo.png', metadata }], directories: [], totalCount: 1, directFileCount: 1, directFolderCount: 0, returnedCount: 1 },
+                    : { success: true, files: options.sourceFiles || [{ id: 'photo.png', metadata }], directories: [], totalCount: 1, directFileCount: 1, directFolderCount: 0, returnedCount: 1 },
                 getDatabase: () => ({
                     async list() { return { keys: [{ name: 'photo.png', metadata }] }; },
                 }),

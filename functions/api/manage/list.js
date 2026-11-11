@@ -115,21 +115,28 @@ export async function onRequest(context) {
             });
         }
 
+        const queryOptions = {
+            search, directory: dir, start, count,
+            channel: channelArray, listType: listTypeArray,
+            accessStatus: accessStatusArray, label: labelArray,
+            fileType: fileTypeArray, channelName: channelNameArray,
+            includeTags: includeTagsArray, excludeTags: excludeTagsArray,
+            includeSubdirFiles: recursive,
+        };
+        const directQuery = async options => {
+            const records = await getAllFileRecords(context.env, dir);
+            if (records.error) throw new Error(records.error);
+            return readIndex(context, {
+                ...options,
+                sourceFiles: records.records.map(file => ({ id: file.name, metadata: file.metadata })),
+            });
+        };
+
         // 普通查询：只返回总数
         if (count === -1 && sum) {
-            const result = await readIndex(context, {
-                search,
-                directory: dir,
-                channel: channelArray,
-                listType: listTypeArray,
-                accessStatus: accessStatusArray,
-                label: labelArray,
-                fileType: fileTypeArray,
-                channelName: channelNameArray,
-                includeTags: includeTagsArray,
-                excludeTags: excludeTagsArray,
-                countOnly: true
-            });
+            const options = { ...queryOptions, countOnly: true };
+            let result = await readIndex(context, options);
+            if (result.success === false) result = await directQuery(options);
 
             return new Response(JSON.stringify({
                 sum: result.totalCount,
@@ -140,33 +147,20 @@ export async function onRequest(context) {
         }
 
         // 普通查询：返回数据
-        const result = await readIndex(context, {
-            search,
-            directory: dir,
-            start,
-            count,
-            channel: channelArray,
-            listType: listTypeArray,
-            accessStatus: accessStatusArray,
-            label: labelArray,
-            fileType: fileTypeArray,
-            channelName: channelNameArray,
-            includeTags: includeTagsArray,
-            excludeTags: excludeTagsArray,
-            includeSubdirFiles: recursive,
-        });
+        const result = await readIndex(context, queryOptions);
 
         // 索引读取失败，直接从 KV 中获取所有文件记录
         if (!result.success) {
-            const dbRecords = await getAllFileRecords(context.env, dir);
+            const fallback = await directQuery(queryOptions);
+            if (!fallback.success) throw new Error('Failed to query database fallback');
 
             return new Response(JSON.stringify({
-                files: dbRecords.files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) })),
-                directories: dbRecords.directories,
-                totalCount: dbRecords.totalCount,
-                directFileCount: dbRecords.directFileCount,
-                directFolderCount: dbRecords.directFolderCount,
-                returnedCount: dbRecords.returnedCount,
+                files: fallback.files.map(file => ({ name: file.id, metadata: stripSensitiveMetadata(file.metadata) })),
+                directories: fallback.directories,
+                totalCount: fallback.totalCount,
+                directFileCount: fallback.directFileCount,
+                directFolderCount: fallback.directFolderCount,
+                returnedCount: fallback.returnedCount,
                 indexLastUpdated: Date.now(),
                 isIndexedResponse: false // 标记这是来自 KV 的响应
             }), {
@@ -211,18 +205,21 @@ async function getAllFileRecords(env, dir) {
 
     try {
         const db = getDatabase(env);
+        const pageSize = typeof db.listPendingIndexOperations === 'function' ? 4000 : 1000;
 
         while (true) {
             const response = await db.list({
                 prefix: dir,
-                limit: 1000,
+                limit: pageSize,
                 cursor: cursor
             });
 
             // 检查响应格式
             if (!response || !response.keys || !Array.isArray(response.keys)) {
-                console.error('Invalid response from database list:', response);
-                break;
+                throw new Error('Invalid response from database list');
+            }
+            if (response.list_complete === false && !response.cursor) {
+                throw new Error('Database list returned an incomplete page without a cursor');
             }
 
             cursor = response.cursor;
@@ -262,6 +259,7 @@ async function getAllFileRecords(env, dir) {
 
         return {
             files: filteredRecords,
+            records: allRecords,
             directories: Array.from(directories),
             totalCount: allRecords.length,
             directFileCount: filteredRecords.length,
@@ -273,6 +271,7 @@ async function getAllFileRecords(env, dir) {
         console.error('Error in getAllFileRecords:', error);
         return {
             files: [],
+            records: [],
             directories: [],
             totalCount: 0,
             directFileCount: 0,

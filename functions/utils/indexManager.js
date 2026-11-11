@@ -324,12 +324,17 @@ export async function mergeOperationsToIndex(context, options = {}) {
         }
 
         // 获取所有待处理的操作
-        const operationsResult = await getAllPendingOperations(context, currentIndex.lastOperationId);
+        // KV operation IDs contain a random suffix. A high-water mark can
+        // permanently hide a later write whose suffix sorts before it.
+        // The queue itself is the source of truth; successful merges delete
+        // their entries, and replays must be idempotent.
+        const operationsResult = await getAllPendingOperations(context);
 
         const operations = operationsResult.operations;
         const isALLOperations = operationsResult.isAll;
 
         if (operations.length === 0) {
+            if (!isALLOperations) return { success: false, processedOperations: 0, error: 'Failed to read pending operations' };
             console.log('No pending operations to merge');
             return {
                 success: true,
@@ -406,15 +411,27 @@ export async function mergeOperationsToIndex(context, options = {}) {
             }
         }
 
+        // A deleted/replaced file can have an older operation still queued
+        // (for example if cleanup failed). Reconcile every affected ID with
+        // current KV records so replay and equal-timestamp ordering cannot
+        // resurrect a stale embedded metadata snapshot.
+        if (processedOperationIds.length) {
+            const affected = [...affectedOperationIds(operations.filter(op => processedOperationIds.includes(op.id)))];
+            const affectedSet = new Set(affected);
+            workingIndex.files = workingIndex.files.filter(file => !affectedSet.has(file.id));
+            for (let i = 0; i < affected.length; i += 100) {
+                workingIndex.files.push(...await db.getIndexFiles(affected.slice(i, i + 100)));
+            }
+            workingIndex.files.sort((a, b) => (b.metadata?.TimeStamp || 0) - (a.metadata?.TimeStamp || 0)
+                || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        }
+
         // 如果有任何修改，保存索引
         if (operationsProcessed > 0) {
             workingIndex.lastUpdated = Date.now();
             workingIndex.totalCount = workingIndex.files.length;
             
-            // 记录最后处理的操作ID
-            if (processedOperationIds.length > 0) {
-                workingIndex.lastOperationId = processedOperationIds[processedOperationIds.length - 1];
-            }
+            workingIndex.lastOperationId = null;
 
             // 保存更新后的索引（使用分块格式）
             const saveSuccess = await saveChunkedIndex(context, workingIndex);
@@ -474,15 +491,7 @@ async function mergeD1Index(context, db, index, cleanup) {
     // Queue entries identify the changed IDs. Use current file records, not
     // event order or embedded metadata: two providers can publish their queue
     // entries in a different order from the committed file mutations.
-    const ids = new Set();
-    const add = id => { if (typeof id === 'string' && id) ids.add(id); };
-    for (const { type, data } of page) {
-        if (type === 'add' || type === 'remove') add(data.fileId);
-        else if (type === 'move') { add(data.originalFileId); add(data.newFileId); }
-        else if (type === 'batch_add') for (const file of data.files) add(file.fileId);
-        else if (type === 'batch_remove') for (const id of data.fileIds) add(id);
-        else if (type === 'batch_move') for (const move of data.operations) { add(move.originalFileId); add(move.newFileId); }
-    }
+    const ids = affectedOperationIds(page);
     const affected = [...ids];
     const files = index.files.filter(file => !ids.has(file.id));
     for (let i = 0; i < affected.length; i += 500) {
@@ -494,6 +503,19 @@ async function mergeD1Index(context, db, index, cleanup) {
     }, { expected: index.snapshot, operationIds: cleanup ? page.map(op => op.id) : [] });
     return { success: saved && operations.length <= 30, processedOperations: saved ? page.length : 0,
         totalFiles: files.length, error: !saved ? 'Index changed during merge; retry' : operations.length > 30 ? 'Index updates remain pending' : undefined };
+}
+
+function affectedOperationIds(operations) {
+    const ids = new Set();
+    const add = id => { if (typeof id === 'string' && id) ids.add(id); };
+    for (const { type, data } of operations) {
+        if (type === 'add' || type === 'remove') add(data.fileId);
+        else if (type === 'move') { add(data.originalFileId); add(data.newFileId); }
+        else if (type === 'batch_add') for (const file of data.files) add(file.fileId);
+        else if (type === 'batch_remove') for (const id of data.fileIds) add(id);
+        else if (type === 'batch_move') for (const move of data.operations) { add(move.originalFileId); add(move.newFileId); }
+    }
+    return ids;
 }
 
 /**
@@ -531,7 +553,8 @@ export async function readIndex(context, options = {}) {
             includeTags = [],
             excludeTags = [],
             countOnly = false,
-            includeSubdirFiles = false
+            includeSubdirFiles = false,
+            sourceFiles = null
         } = options;
 
         // 将参数统一转换为数组形式
@@ -545,23 +568,30 @@ export async function readIndex(context, options = {}) {
         // 处理目录满足无头有尾的格式，根目录为空
         const dirPrefix = directory === '' || directory.endsWith('/') ? directory : directory + '/';
 
-        // 处理挂起的操作
-        let mergeResult = await mergeOperationsToIndex(context);
-        // A large restore can enqueue many small, bounded pages. Make a few
-        // more passes on D1 without a self-fetch or forwarding credentials.
-        if (typeof getDatabase(context.env).listPendingIndexOperations === 'function') {
-            for (let pass = 0; pass < 3 && mergeResult.error === 'Index updates remain pending'; pass++) {
-                mergeResult = await mergeOperationsToIndex(context);
+        // A failed merge may fall back to authoritative database records.
+        // Run the exact same filtering/pagination logic without merging again.
+        let index;
+        if (sourceFiles !== null) {
+            index = { success: true, files: sourceFiles, lastUpdated: Date.now() };
+        } else {
+            // 处理挂起的操作
+            let mergeResult = await mergeOperationsToIndex(context);
+            // A large restore can enqueue many small, bounded pages. Make a few
+            // more passes on D1 without a self-fetch or forwarding credentials.
+            if (typeof getDatabase(context.env).listPendingIndexOperations === 'function') {
+                for (let pass = 0; pass < 3 && mergeResult.error === 'Index updates remain pending'; pass++) {
+                    mergeResult = await mergeOperationsToIndex(context);
+                }
             }
-        }
-        if (!mergeResult.success) {
-            throw new Error('Failed to merge operations: ' + mergeResult.error);
-        }
+            if (!mergeResult.success) {
+                throw new Error('Failed to merge operations: ' + mergeResult.error);
+            }
 
-        // 获取当前索引
-        const index = await getIndex(context);
-        if (!index.success) {
-            throw new Error('Failed to get index');
+            // 获取当前索引
+            index = await getIndex(context);
+            if (!index.success) {
+                throw new Error('Failed to get index');
+            }
         }
 
         let filteredFiles = index.files;
@@ -1369,9 +1399,8 @@ function sanitizeOperationData(value) {
 /**
  * 获取所有待处理的操作
  * @param {Object} context - 上下文对象
- * @param {string} lastOperationId - 最后处理的操作ID
  */
-async function getAllPendingOperations(context, lastOperationId = null) {
+async function getAllPendingOperations(context) {
     const { env } = context;
     const db = getDatabase(env);
 
@@ -1391,11 +1420,6 @@ async function getAllPendingOperations(context, lastOperationId = null) {
             });
             
             for (const item of response.keys) {
-                // 如果指定了lastOperationId，跳过已处理的操作
-                if (lastOperationId && item.name <= OPERATION_KEY_PREFIX + lastOperationId) {
-                    continue;
-                }
-                
                 if (operationCount >= MAX_OPERATION_COUNT) {
                     isALL = false; // 达到最大操作数量，停止获取
                     break;
@@ -1420,6 +1444,7 @@ async function getAllPendingOperations(context, lastOperationId = null) {
         }
     } catch (error) {
         console.error('Error getting pending operations:', error);
+        isALL = false;
     }
     
     return {
