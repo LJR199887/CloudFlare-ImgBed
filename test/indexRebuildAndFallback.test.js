@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import '../deploy/server/register.mjs';
 import { databaseFixture } from './helpers/databaseFixture.js';
-import { mergeOperationsToIndex } from '../functions/utils/indexManager.js';
+import { mergeOperationsToIndex, rebuildIndex } from '../functions/utils/indexManager.js';
 import { onRequestPost as finalize } from '../functions/api/manage/batch/index/finalize.js';
 import { onRequest as list } from '../functions/api/manage/list.js';
 
@@ -46,6 +46,25 @@ it('KV add/remove events survive stale file reads until the edge cache catches u
     assert.equal(await db.get('manage@index@operation_2001_a'), null);
     env.img_url.getWithMetadata = getWithMetadata;
     assert.deepEqual((await list({ ...context(env), request: new Request(`${origin}/api/manage/list`) }).then(r => r.json())).files, []);
+});
+
+it('KV does not replay an acknowledged operation that reappears at another edge', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    const ctx = context(env);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    seed('gone.png', '', metadata);
+    const old = { type: 'add', timestamp: 100, data: { fileId: 'gone.png', metadata } };
+    await db.putIndexOperation('100_z', old);
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    await db.delete('gone.png');
+    await db.putIndexOperation('200_z', { type: 'remove', timestamp: 200, data: { fileId: 'gone.png' } });
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.equal((await rebuildIndex(ctx)).success, true);
+    assert.equal((await post(env, { sessionId: 'rebuild_empty', totalChunks: 0, totalFiles: 0 })).status, 200);
+    await db.putIndexOperation('100_z', old); // Simulate an edge seeing the deleted queue entry again.
+    assert.equal((await mergeOperationsToIndex(ctx)).success, true);
+    assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 0);
+    assert.deepEqual((await list(ctx).then(r => r.json())).files, []);
 });
 
 it('KV pending-operation list errors do not report a successful empty merge', async t => {

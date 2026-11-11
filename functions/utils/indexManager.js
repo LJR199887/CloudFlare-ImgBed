@@ -356,10 +356,18 @@ export async function mergeOperationsToIndex(context, options = {}) {
         let movedCount = 0;
         let updatedCount = 0;
         const processedOperationIds = [];
+        // KV can briefly expose an operation again after its delete. Keep a
+        // bounded exact-ID receipt list, not a lexicographic high-water mark:
+        // a genuinely new same-millisecond ID may sort before the old one.
+        const appliedOperationIds = new Set(currentIndex.appliedOperationIds || []);
 
         // 应用每个操作
         for (const operation of operations) {
             try {
+                if (appliedOperationIds.has(operation.id)) {
+                    processedOperationIds.push(operation.id);
+                    continue;
+                }
                 switch (operation.type) {
                     case 'add':
                         const addResult = applyAddOperation(workingIndex, operation.data);
@@ -400,6 +408,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
                 
                 operationsProcessed++;
                 processedOperationIds.push(operation.id);
+                appliedOperationIds.add(operation.id);
 
                 // 增加协作点
                 if (operationsProcessed % 3 === 0) {
@@ -422,6 +431,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
             workingIndex.totalCount = workingIndex.files.length;
             
             workingIndex.lastOperationId = null;
+            workingIndex.appliedOperationIds = [...appliedOperationIds].slice(-10000);
 
             // 保存更新后的索引（使用分块格式）
             const saveSuccess = await saveChunkedIndex(context, workingIndex);
@@ -843,6 +853,15 @@ export async function rebuildIndex(context, progressCallback = null) {
             totalCount: 0,
             lastOperationId: null
         };
+        if (!d1Snapshot) {
+            const oldMeta = await db.get(INDEX_META_KEY);
+            if (oldMeta) {
+                try {
+                    const ids = JSON.parse(oldMeta).appliedOperationIds;
+                    if (Array.isArray(ids)) newIndex.appliedOperationIds = ids.slice(-10000);
+                } catch (_) { /* A corrupt old index must not block repair. */ }
+            }
+        }
 
         // 分批读取所有文件
         while (true) {
@@ -2007,6 +2026,8 @@ async function saveChunkedIndex(context, index, { expected, operationIds } = {})
             totalSizeMB: Math.round(totalSizeMB * 100) / 100,
             channelStats,
             lastOperationId: index.lastOperationId,
+            ...(typeof db.listPendingIndexOperations !== 'function'
+                ? { appliedOperationIds: (index.appliedOperationIds || []).slice(-10000) } : {}),
             chunkCount: chunks.length,
             chunkSize: chunkSize
         };
@@ -2083,6 +2104,7 @@ async function loadChunkedIndex(context) {
             lastUpdated: metadata.lastUpdated,
             totalCount: metadata.totalCount,
             lastOperationId: metadata.lastOperationId,
+            appliedOperationIds: Array.isArray(metadata.appliedOperationIds) ? metadata.appliedOperationIds : [],
             snapshot: metadataStr,
             success: true
         };

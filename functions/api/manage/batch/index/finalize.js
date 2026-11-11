@@ -221,7 +221,7 @@ async function verifyKVFiles(db, files) {
  * @param {Object} env - 环境变量
  * @returns {Promise<{success: boolean, metadata?: Object, error?: string}>}
  */
-async function saveIndex(db, files, env, expected, rebuildChunks = []) {
+async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = []) {
   try {
     files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
@@ -261,6 +261,7 @@ async function saveIndex(db, files, env, expected, rebuildChunks = []) {
       totalSizeMB: Math.round(totalSizeMB * 100) / 100,
       channelStats,
       lastOperationId: null, // 重建后清除操作 ID
+      ...(expected === undefined ? { appliedOperationIds: appliedOperationIds.slice(-10000) } : {}),
       chunkCount: chunks.length,
       chunkSize: chunkSize,
     };
@@ -346,6 +347,14 @@ export async function onRequestPost(context) {
     const db = getDatabase(env);
     const atomic = typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function';
     const expected = atomic ? await db.get(INDEX_META_KEY) : undefined;
+    const oldMeta = !atomic ? await db.get(INDEX_META_KEY) : null;
+    let appliedOperationIds = [];
+    if (oldMeta) {
+      try {
+        const ids = JSON.parse(oldMeta).appliedOperationIds;
+        if (Array.isArray(ids)) appliedOperationIds = ids.filter(id => typeof id === 'string').slice(-10000);
+      } catch (_) { /* Rebuilds also repair corrupt metadata. */ }
+    }
 
     if (atomic) {
       // Browser staging may be older than a deletion whose queue entry was
@@ -387,7 +396,7 @@ export async function onRequestPost(context) {
     }
 
     // 保存新索引
-    const saveResult = await saveIndex(db, allFiles, env, expected);
+    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds);
     if (!saveResult.success) {
       return errorResponse('Failed to save index', saveResult.conflict ? 409 : 500, saveResult.error);
     }
