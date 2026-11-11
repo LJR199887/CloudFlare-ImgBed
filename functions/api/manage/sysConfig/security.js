@@ -1,3 +1,4 @@
+import { parseSecuritySettings, validateSecuritySettings } from '../../../utils/auth/securitySettings.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { hashPassword, isHashed } from '../../../utils/auth/passwordHash.js';
 import { destroySessionsByAuthType } from '../../../utils/auth/sessionManager.js';
@@ -42,8 +43,12 @@ export async function onRequest(context) {
     if (request.method === 'POST') {
         const settings = await getSecurityConfig(db, env) // 先读取已有设置，再进行覆盖
 
-        const body = await request.json()
-        const newSettings = body
+        let newSettings;
+        try {
+            newSettings = validateSecuritySettings(await request.json());
+        } catch {
+            return Response.json({ error: 'Invalid security configuration' }, { status: 400 });
+        }
 
         // 覆盖设置，apiTokens不在这里修改
         settings.upload = newSettings.upload || settings.upload
@@ -101,7 +106,7 @@ export async function onRequest(context) {
         delete settings.auth.admin?._hasPassword;
 
         // 写入数据库
-        await db.put('manage@sysConfig@security', JSON.stringify(settings))
+        await db.put('manage@sysConfig@security', JSON.stringify(validateSecuritySettings(settings)))
 
         // 密码变更后清除对应类型的所有会话
         if (userPasswordChanged) {
@@ -128,19 +133,7 @@ export async function getSecurityConfig(db, env) {
     const settings = {}
     // 读取数据库中的设置
     const settingsStr = await db.get('manage@sysConfig@security')
-    const settingsKV = settingsStr == null ? {} : JSON.parse(settingsStr)
-    // Syntactically valid but malformed backups must not silently erase auth.
-    const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-    if (!isRecord(settingsKV) || (settingsKV.auth !== undefined && !isRecord(settingsKV.auth))) {
-        throw new Error('Invalid security configuration');
-    }
-    for (const [section, fields] of [['admin', ['adminUsername', 'adminPassword']], ['user', ['authCode']]]) {
-        const value = settingsKV.auth?.[section];
-        if (value === undefined) continue;
-        if (!isRecord(value) || fields.some(key => value[key] != null && typeof value[key] !== 'string')) {
-            throw new Error('Invalid authentication configuration');
-        }
-    }
+    const settingsKV = settingsStr == null ? {} : parseSecuritySettings(settingsStr);
 
     // 认证管理
     const kvAuth = settingsKV.auth || {}

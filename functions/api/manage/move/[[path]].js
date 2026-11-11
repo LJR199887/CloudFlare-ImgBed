@@ -1,6 +1,7 @@
 import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { moveFileInIndex, batchMoveFilesInIndex } from "../../../utils/indexManager.js";
+import { deletionMayStillApply, withFileMutation, FileMutationConflict } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
@@ -132,107 +133,118 @@ export async function onRequest(context) {
 // 移动单个文件的核心函数
 async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
     try {
-        const db = getDatabase(env);
+        return await withFileMutation(env, [fileId, newFileId], async (env, retainClaim) => {
+            const db = getDatabase(env);
 
-        // 读取图片信息
-        const img = await db.getWithMetadata(fileId);
-        if (!img?.metadata) throw new Error('File not found');
-        if (fileId === newFileId) return true;
-        // Refuse collisions before copying/deleting any storage object. In
-        // particular, the destination may have protected legacy credentials.
-        const destination = await db.getWithMetadata(newFileId);
-        if (destination && destination.value != null) throw new Error('Target file already exists');
-        await assertLegacyWriteSafe(db, env, fileId);
-        img.metadata = await hydrateFileCredentials(env, img.metadata);
+            // 读取图片信息
+            const img = await db.getWithMetadata(fileId);
+            if (!img?.metadata) throw new Error('File not found');
+            if (fileId === newFileId) return true;
+            // Refuse collisions before copying/deleting any storage object. In
+            // particular, the destination may have protected legacy credentials.
+            const destination = await db.getWithMetadata(newFileId);
+            if (destination && destination.value != null) throw new Error('Target file already exists');
+            await assertLegacyWriteSafe(db, env, fileId);
+            img.metadata = await hydrateFileCredentials(env, img.metadata);
 
-        // Keep the source usable until the destination record is committed.
-        let deleteSource = async () => {};
+            // Keep the source usable until the destination record is committed.
+            let deleteSource = async () => {};
 
-        // 如果是R2渠道的图片，需要移动R2中对应的图片
-        if (img.metadata?.Channel === 'CloudflareR2') {
-            const R2DataBase = env.img_r2;
+            // 如果是R2渠道的图片，需要移动R2中对应的图片
+            if (img.metadata?.Channel === 'CloudflareR2') {
+                const R2DataBase = env.img_r2;
 
-            // 获取原文件内容
-            const object = await R2DataBase.get(fileId);
-            if (!object) {
-                throw new Error('R2 Object Not Found');
+                // 获取原文件内容
+                const object = await R2DataBase.get(fileId);
+                if (!object) {
+                    throw new Error('R2 Object Not Found');
+                }
+
+                // 复制到新位置
+                const copied = await R2DataBase.put(newFileId, object.body, {
+                    httpMetadata: object.httpMetadata,
+                    customMetadata: object.customMetadata,
+                    onlyIf: new Headers({ 'If-None-Match': '*' }),
+                });
+                if (copied === null) throw new FileMutationConflict();
+
+                // 删除旧文件
+                deleteSource = () => R2DataBase.delete(fileId);
             }
 
-            // 复制到新位置
-            await R2DataBase.put(newFileId, object.body, { httpMetadata: object.httpMetadata, customMetadata: object.customMetadata });
+            // S3 渠道的图片，需要移动S3中对应的图片
+            if (img.metadata?.Channel === 'S3') {
+                const { success, newKey, error, cleanup } = await copyS3File(img, newFileId);
+                if (success) {
+                    deleteSource = cleanup;
+                    // 更新 metadata
+                    img.metadata.S3FileKey = newFileId;
 
-            // 删除旧文件
-            deleteSource = () => R2DataBase.delete(fileId);
-        }
+                    const s3ServerDomain = img.metadata.S3Endpoint.replace(/https?:\/\//, "");
+                    img.metadata.S3Location = `https://${img.metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
+                } else {
+                    throw new Error(error || 'S3 Move Failed');
+                }
+            }
 
-        // S3 渠道的图片，需要移动S3中对应的图片
-        if (img.metadata?.Channel === 'S3') {
-            const { success, newKey, error, cleanup } = await copyS3File(img, newFileId);
-            if (success) {
+            // WebDAV 渠道的图片，需要移动 WebDAV 中对应的文件
+            if (img.metadata?.Channel === 'WebDAV') {
+                const { success, error, webdavConfig, cleanup } = await copyWebDAVFile(env, img, newFileId);
+                if (!success) {
+                    throw new Error(error || 'WebDAV Move Failed');
+                }
                 deleteSource = cleanup;
-                // 更新 metadata
-                img.metadata.S3FileKey = newFileId;
-
-                const s3ServerDomain = img.metadata.S3Endpoint.replace(/https?:\/\//, "");
-                img.metadata.S3Location = `https://${img.metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
-            } else {
-                throw new Error(error || 'S3 Move Failed');
+                img.metadata.WebDAVFilePath = newFileId;
+                if (img.metadata.WebDAVPublicBaseUrl || img.metadata.WebDAVPublicUrl || webdavConfig?.publicUrl) {
+                    const webdavAPI = new WebDAVAPI(webdavConfig || { baseUrl: img.metadata.WebDAVBaseUrl });
+                    const publicBaseUrl = img.metadata.WebDAVPublicBaseUrl
+                        || webdavConfig?.publicUrl
+                        || img.metadata.WebDAVPublicUrl.slice(0, img.metadata.WebDAVPublicUrl.length - fileId.split('/').map(encodeURIComponent).join('/').length);
+                    img.metadata.WebDAVPublicBaseUrl = publicBaseUrl;
+                    img.metadata.WebDAVPublicUrl = webdavAPI.buildPublicUrl(newFileId, publicBaseUrl);
+                }
             }
-        }
 
-        // WebDAV 渠道的图片，需要移动 WebDAV 中对应的文件
-        if (img.metadata?.Channel === 'WebDAV') {
-            const { success, error, webdavConfig, cleanup } = await copyWebDAVFile(env, img, newFileId);
-            if (!success) {
-                throw new Error(error || 'WebDAV Move Failed');
+            // 旧版 Telegram 渠道和 Telegraph 渠道不支持移动
+            if (img.metadata?.Channel === 'Telegram' || img.metadata?.Channel === undefined) {
+                throw new Error('Unsupported Channel');
             }
-            deleteSource = cleanup;
-            img.metadata.WebDAVFilePath = newFileId;
-            if (img.metadata.WebDAVPublicBaseUrl || img.metadata.WebDAVPublicUrl || webdavConfig?.publicUrl) {
-                const webdavAPI = new WebDAVAPI(webdavConfig || { baseUrl: img.metadata.WebDAVBaseUrl });
-                const publicBaseUrl = img.metadata.WebDAVPublicBaseUrl
-                    || webdavConfig?.publicUrl
-                    || img.metadata.WebDAVPublicUrl.slice(0, img.metadata.WebDAVPublicUrl.length - fileId.split('/').map(encodeURIComponent).join('/').length);
-                img.metadata.WebDAVPublicBaseUrl = publicBaseUrl;
-                img.metadata.WebDAVPublicUrl = webdavAPI.buildPublicUrl(newFileId, publicBaseUrl);
+
+            // 更新文件夹信息，根目录为空，否则为 aaa/123/ 的格式
+            const DirectoryPath = newFileId.split('/').slice(0, -1).join('/') === '' ? '' : newFileId.split('/').slice(0, -1).join('/') + '/';
+            img.metadata.Directory = DirectoryPath;
+
+            // 更新KV存储
+            await db.put(newFileId, img.value, { metadata: img.metadata });
+
+            // Do not release the source name while its object deletion is pending:
+            // uploads use this record to avoid reusing a key still being cleaned up.
+            let cleanupWarning;
+            let storageDeleteConfirmed = false;
+            try {
+                await deleteSource();
+                storageDeleteConfirmed = true;
+                await db.delete(fileId);
+            } catch (error) {
+                // A provider may apply a timed-out DELETE later. Do not free
+                // the name for reuse until an operator reconciles the claim.
+                if (!storageDeleteConfirmed && deletionMayStillApply(error)) retainClaim(fileId);
+                console.error('Source object cleanup failed after relocation:', error);
+                cleanupWarning = { fileId, newFileId, message: 'File moved; source cleanup incomplete; inspect the old record and object before retrying' };
+                warnings.push(cleanupWarning);
             }
-        }
 
-        // 旧版 Telegram 渠道和 Telegraph 渠道不支持移动
-        if (img.metadata?.Channel === 'Telegram' || img.metadata?.Channel === undefined) {
-            throw new Error('Unsupported Channel');
-        }
+            // 清除CDN缓存
+            await purgeCFCache(env, cdnUrl);
 
-        // 更新文件夹信息，根目录为空，否则为 aaa/123/ 的格式
-        const DirectoryPath = newFileId.split('/').slice(0, -1).join('/') === '' ? '' : newFileId.split('/').slice(0, -1).join('/') + '/';
-        img.metadata.Directory = DirectoryPath;
+            // 清除 api/randomFileList 等API缓存
+            const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
+            const normalizedDist = newFileId.split('/').slice(0, -1).join('/');
+            await purgeRandomFileListCache(url.origin, normalizedFolder, normalizedDist);
+            await purgePublicFileListCache(url.origin, normalizedFolder, normalizedDist);
 
-        // 更新KV存储
-        await db.put(newFileId, img.value, { metadata: img.metadata });
-
-        // Do not release the source name while its object deletion is pending:
-        // uploads use this record to avoid reusing a key still being cleaned up.
-        let cleanupWarning;
-        try {
-            await deleteSource();
-            await db.delete(fileId);
-        }
-        catch (error) {
-            console.error('Source object cleanup failed after relocation:', error);
-            cleanupWarning = { fileId, newFileId, message: 'File moved; source cleanup incomplete; inspect the old record and object before retrying' };
-            warnings.push(cleanupWarning);
-        }
-
-        // 清除CDN缓存
-        await purgeCFCache(env, cdnUrl);
-
-        // 清除 api/randomFileList 等API缓存
-        const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
-        const normalizedDist = newFileId.split('/').slice(0, -1).join('/');
-        await purgeRandomFileListCache(url.origin, normalizedFolder, normalizedDist);
-        await purgePublicFileListCache(url.origin, normalizedFolder, normalizedDist);
-
-        return true;
+            return true;
+        });
     } catch (e) {
         console.error('Move file failed:', e);
         return false;

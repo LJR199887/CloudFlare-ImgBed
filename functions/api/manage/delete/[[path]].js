@@ -1,6 +1,7 @@
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
+import { deletionMayStillApply, withFileMutation } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
@@ -126,58 +127,63 @@ export async function onRequest(context) {
 }
 
 // 删除单个文件的核心函数
-export async function deleteFile(env, fileId, cdnUrl, url) {
+export async function deleteFile(env, fileId, cdnUrl, url, canDelete = null) {
     try {
-        // 读取图片信息
-        const db = getDatabase(env);
-        const img = await db.getWithMetadata(fileId);
+        return await withFileMutation(env, [fileId], async (env, retainClaim) => {
+            // 读取图片信息
+            const db = getDatabase(env);
+            const img = await db.getWithMetadata(fileId);
 
-        // 如果文件记录不存在，直接返回成功（幂等删除）
-        if (!img || (img.value == null && !img.metadata)) {
-            console.warn(`File ${fileId} not found in database, skipping delete`);
+            // 如果文件记录不存在，直接返回成功（幂等删除）
+            if (!img || (img.value == null && !img.metadata)) {
+                console.warn(`File ${fileId} not found in database, skipping delete`);
+                return true;
+            }
+            if (canDelete && !canDelete(img)) return false;
+            img.metadata = await hydrateFileCredentials(env, img.metadata);
+
+            // 如果是R2渠道的图片，需要删除R2中对应的图片
+            if (img.metadata?.Channel === 'CloudflareR2') {
+                const R2DataBase = env.img_r2;
+                if (!R2DataBase) throw new Error('R2 binding not configured');
+                try { await R2DataBase.delete(fileId); }
+                catch (error) { if (deletionMayStillApply(error)) retainClaim(fileId); throw error; }
+            }
+
+            // S3 渠道的图片，需要删除S3中对应的图片
+            if (img.metadata?.Channel === 'S3') {
+                if (!await deleteS3File(img, () => retainClaim(fileId))) throw new Error('S3 deletion failed');
+            }
+
+            // Discord 渠道的图片，需要删除 Discord 中对应的消息
+            if (img.metadata?.Channel === 'Discord') {
+                if (!await deleteDiscordFile(img)) throw new Error('Discord deletion failed');
+            }
+
+            // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
+            if (img.metadata?.Channel === 'HuggingFace') {
+                if (!await deleteHuggingFaceFile(img)) throw new Error('HuggingFace deletion failed');
+            }
+
+            // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
+            if (img.metadata?.Channel === 'WebDAV') {
+                if (!await deleteWebDAVFile(env, img, () => retainClaim(fileId))) throw new Error('WebDAV deletion failed');
+            }
+
+            // 删除数据库中的记录
+            // 注意：容量统计现在由索引自动维护，删除文件后索引更新时会自动重新计算
+            await db.delete(fileId);
+
+            // 清除CDN缓存
+            await purgeCFCache(env, cdnUrl);
+
+            // 清除 api/randomFileList 等API缓存
+            const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
+            await purgeRandomFileListCache(url.origin, normalizedFolder);
+            await purgePublicFileListCache(url.origin, normalizedFolder);
+
             return true;
-        }
-        img.metadata = await hydrateFileCredentials(env, img.metadata);
-
-        // 如果是R2渠道的图片，需要删除R2中对应的图片
-        if (img.metadata?.Channel === 'CloudflareR2') {
-            const R2DataBase = env.img_r2;
-            await R2DataBase.delete(fileId);
-        }
-
-        // S3 渠道的图片，需要删除S3中对应的图片
-        if (img.metadata?.Channel === 'S3') {
-            if (!await deleteS3File(img)) throw new Error('S3 deletion failed');
-        }
-
-        // Discord 渠道的图片，需要删除 Discord 中对应的消息
-        if (img.metadata?.Channel === 'Discord') {
-            if (!await deleteDiscordFile(img)) throw new Error('Discord deletion failed');
-        }
-
-        // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
-        if (img.metadata?.Channel === 'HuggingFace') {
-            if (!await deleteHuggingFaceFile(img)) throw new Error('HuggingFace deletion failed');
-        }
-
-        // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
-        if (img.metadata?.Channel === 'WebDAV') {
-            if (!await deleteWebDAVFile(env, img)) throw new Error('WebDAV deletion failed');
-        }
-
-        // 删除数据库中的记录
-        // 注意：容量统计现在由索引自动维护，删除文件后索引更新时会自动重新计算
-        await db.delete(fileId);
-
-        // 清除CDN缓存
-        await purgeCFCache(env, cdnUrl);
-
-        // 清除 api/randomFileList 等API缓存
-        const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
-        await purgeRandomFileListCache(url.origin, normalizedFolder);
-        await purgePublicFileListCache(url.origin, normalizedFolder);
-
-        return true;
+        });
     } catch (e) {
         console.error('Delete file failed:', e);
         return false;
@@ -185,7 +191,9 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
 }
 
 // 删除 S3 渠道的图片
-async function deleteS3File(img) {
+async function deleteS3File(img, onUncertainDelete) {
+    const m = img.metadata;
+    if (!m?.S3BucketName || !m.S3FileKey || !m.S3AccessKeyId || !m.S3SecretAccessKey) return false;
     const s3Client = new S3Client({
         region: img.metadata?.S3Region || "auto",
         endpoint: img.metadata?.S3Endpoint,
@@ -206,6 +214,7 @@ async function deleteS3File(img) {
         }));
         return true;
     } catch (error) {
+        if (deletionMayStillApply(error)) onUncertainDelete();
         console.error("S3 Delete Failed:", error);
         return false;
     }
@@ -288,7 +297,7 @@ async function deleteHuggingFaceFile(img) {
 
 
 // 删除 WebDAV 渠道的图片
-async function deleteWebDAVFile(env, img) {
+async function deleteWebDAVFile(env, img, onUncertainDelete) {
     const filePath = img.metadata?.WebDAVFilePath;
 
     if (!filePath) {
@@ -306,6 +315,7 @@ async function deleteWebDAVFile(env, img) {
         const webdavAPI = new WebDAVAPI(webdavConfig);
         return await webdavAPI.deleteFile(filePath);
     } catch (error) {
+        if (deletionMayStillApply(error)) onUncertainDelete();
         console.error("WebDAV Delete Failed:", error);
         return false;
     }

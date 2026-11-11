@@ -25,3 +25,4 @@ jobs:
         run: |
           npx --no-install wrangler pages functions build functions --outdir "$RUNNER_TEMP/imgbed-worker"
           node scripts/verify-file-boundaries.mjs "$RUNNER_TEMP/imgbed-worker/index.js"
+          node scripts/verify-mutation-coordination.mjs

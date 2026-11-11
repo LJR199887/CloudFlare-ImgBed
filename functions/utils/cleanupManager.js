@@ -144,7 +144,7 @@ async function listExpiredFiles(env, config, cutoff) {
             skipped++;
             continue;
         }
-        selected.push(row.id);
+        selected.push(row);
         if (selected.length >= config.batchSize) break;
     }
 
@@ -198,9 +198,11 @@ export async function runCleanup(context, options = {}) {
         result.matched = expired.selected.length;
 
         if (!config.dryRun) {
-            for (const fileId of expired.selected) {
+            for (const row of expired.selected) {
+                const fileId = row.id;
+                const expected = JSON.stringify(JSON.parse(row.metadata || '{}'));
                 const cdnUrl = `${url.origin}/file/${fileId}`;
-                const ok = await deleteFile(env, fileId, cdnUrl, url);
+                const ok = await deleteFile(env, fileId, cdnUrl, url, current => JSON.stringify(current.metadata) === expected);
                 if (ok) {
                     result.deleted++;
                     deletedFileIds.push(fileId);

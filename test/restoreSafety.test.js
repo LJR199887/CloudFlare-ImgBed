@@ -10,8 +10,18 @@ import { loadFunction, memoryDatabase } from './helpers/loadFunction.js';
 function fixture(backend) {
     const kv = memoryDatabase();
     const records = kv.records;
+    const claims = new Map();
     const env = backend === 'KV' ? { img_url: kv } : { img_d1: {
         prepare(sql) {
+            if (sql.startsWith('CREATE TABLE IF NOT EXISTS file_mutation_claims')) return { async run() {} };
+            if (sql.startsWith('INSERT INTO file_mutation_claims')) return { bind(id, owner) { return { async first() {
+                if (claims.has(id)) return null;
+                claims.set(id, owner);
+                return { id };
+            } }; } };
+            if (sql.startsWith('DELETE FROM file_mutation_claims')) return { bind(id, owner) { return { async run() {
+                if (claims.get(id) === owner) claims.delete(id);
+            } }; } };
             return { bind(...args) { return {
                 async first() {
                     assert.match(sql, /^SELECT (\* FROM files WHERE id|value FROM settings WHERE key) = \?$/);

@@ -1,3 +1,4 @@
+import { withFileMutation, FileMutationConflict } from '../../utils/fileMutation.js';
 /**
  * HuggingFace 大文件提交 API
  * 
@@ -45,120 +46,123 @@ export async function onRequestPost(context) {
             });
         }
 
-        // 获取 HuggingFace 配置
-        const uploadConfig = await fetchUploadConfig(env);
-        const hfSettings = uploadConfig.huggingface;
+        return await withFileMutation(env, [fullId], async env => {
+            const db = getDatabase(env);
+            if (await db.get(fullId) != null) throw new FileMutationConflict();
+            // 获取 HuggingFace 配置
+            const uploadConfig = await fetchUploadConfig(env);
+            const hfSettings = uploadConfig.huggingface;
 
-        if (!hfSettings || !hfSettings.channels || hfSettings.channels.length === 0) {
-            return createResponse(JSON.stringify({ error: 'No HuggingFace channel configured' }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-
-        // 选择渠道
-        let hfChannel;
-        if (channelName) {
-            hfChannel = hfSettings.channels.find(c => c.name === channelName);
-        }
-        if (!hfChannel) {
-            hfChannel = hfSettings.channels[0];
-        }
-
-        if (!hfChannel || !hfChannel.token || !hfChannel.repo) {
-            return createResponse(JSON.stringify({ error: 'HuggingFace channel not properly configured' }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-
-        const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
-
-        // 如果有 multipart parts，需要先完成 multipart 上传
-        if (multipartParts && multipartParts.length > 0) {
-            console.log('Completing multipart upload...');
-        }
-
-        // 提交 LFS 文件引用
-        console.log('Committing LFS file...');
-        const commitResult = await huggingfaceAPI.commitLfsFile(
-            filePath,
-            sha256,
-            fileSize,
-            `Upload ${fileName || fullId}`
-        );
-        console.log('Commit result:', JSON.stringify(commitResult));
-
-        // 构建文件 URL
-        const fileUrl = `https://huggingface.co/datasets/${hfChannel.repo}/resolve/main/${filePath}`;
-
-        // 从 fullId 中提取目录信息
-        const dirParts = fullId.split('/').slice(0, -1).join('/');
-        const normalizedDirectory = dirParts === '' ? '' : dirParts + '/';
-
-        // 获取上传IP和地址
-        const uploadIp = getUploadIp(request) || '';
-        const uploadAddress = await getIPAddress(uploadIp);
-
-        // 构建 metadata
-        const metadata = {
-            FileName: fileName || fullId,
-            FileType: resolveFileType(fileName || fullId, fileType),
-            Channel: "HuggingFace",
-            ChannelName: hfChannel.name || "HuggingFace_env",
-            FileSize: (fileSize / 1024 / 1024).toFixed(2),
-            FileSizeBytes: fileSize,
-            UploadIP: uploadIp,
-            UploadAddress: uploadAddress,
-            ListType: "None",
-            HfRepo: hfChannel.repo,
-            HfFilePath: filePath,
-            HfIsPrivate: hfChannel.isPrivate || false,
-            HfFileUrl: fileUrl,
-            TimeStamp: Date.now(),
-            Label: "None",
-            Directory: normalizedDirectory,
-            Tags: []
-        };
-
-        // 图像审查（公开仓库）
-        if (!hfChannel.isPrivate) {
-            try {
-                metadata.Label = await moderateContent(env, fileUrl);
-            } catch (e) {
-                console.warn('Content moderation failed:', e.message);
+            if (!hfSettings || !hfSettings.channels || hfSettings.channels.length === 0) {
+                return createResponse(JSON.stringify({ error: 'No HuggingFace channel configured' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' }
+                });
             }
-        }
 
-        // 写入数据库
-        const db = getDatabase(env);
-        await db.put(fullId, "", { metadata });
+            // 选择渠道
+            let hfChannel;
+            if (channelName) {
+                hfChannel = hfSettings.channels.find(c => c.name === channelName);
+            }
+            if (!hfChannel) {
+                hfChannel = hfSettings.channels[0];
+            }
 
-        // 结束上传（更新索引等）
-        const uploadContext = {
-            env,
-            waitUntil,
-            uploadConfig,
-            url
-        };
-        waitUntil(endUpload(uploadContext, fullId, metadata));
+            if (!hfChannel || !hfChannel.token || !hfChannel.repo) {
+                return createResponse(JSON.stringify({ error: 'HuggingFace channel not properly configured' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
 
-        // 返回成功响应
-        const returnLink = `/file/${fullId}`;
-        return createResponse(JSON.stringify({
-            success: true,
-            src: returnLink,
-            fileUrl,
-            fullId
-        }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
+
+            // 如果有 multipart parts，需要先完成 multipart 上传
+            if (multipartParts && multipartParts.length > 0) {
+                console.log('Completing multipart upload...');
+            }
+
+            // 提交 LFS 文件引用
+            console.log('Committing LFS file...');
+            const commitResult = await huggingfaceAPI.commitLfsFile(
+                filePath,
+                sha256,
+                fileSize,
+                `Upload ${fileName || fullId}`
+            );
+            console.log('Commit result:', JSON.stringify(commitResult));
+
+            // 构建文件 URL
+            const fileUrl = `https://huggingface.co/datasets/${hfChannel.repo}/resolve/main/${filePath}`;
+
+            // 从 fullId 中提取目录信息
+            const dirParts = fullId.split('/').slice(0, -1).join('/');
+            const normalizedDirectory = dirParts === '' ? '' : dirParts + '/';
+
+            // 获取上传IP和地址
+            const uploadIp = getUploadIp(request) || '';
+            const uploadAddress = await getIPAddress(uploadIp);
+
+            // 构建 metadata
+            const metadata = {
+                FileName: fileName || fullId,
+                FileType: resolveFileType(fileName || fullId, fileType),
+                Channel: "HuggingFace",
+                ChannelName: hfChannel.name || "HuggingFace_env",
+                FileSize: (fileSize / 1024 / 1024).toFixed(2),
+                FileSizeBytes: fileSize,
+                UploadIP: uploadIp,
+                UploadAddress: uploadAddress,
+                ListType: "None",
+                HfRepo: hfChannel.repo,
+                HfFilePath: filePath,
+                HfIsPrivate: hfChannel.isPrivate || false,
+                HfFileUrl: fileUrl,
+                TimeStamp: Date.now(),
+                Label: "None",
+                Directory: normalizedDirectory,
+                Tags: []
+            };
+
+            // 图像审查（公开仓库）
+            if (!hfChannel.isPrivate) {
+                try {
+                    metadata.Label = await moderateContent(env, fileUrl);
+                } catch (e) {
+                    console.warn('Content moderation failed:', e.message);
+                }
+            }
+
+            // 写入数据库
+            await db.put(fullId, "", { metadata });
+
+            // 结束上传（更新索引等）
+            const uploadContext = {
+                env,
+                waitUntil,
+                uploadConfig,
+                url
+            };
+            waitUntil(endUpload(uploadContext, fullId, metadata));
+
+            // 返回成功响应
+            const returnLink = `/file/${fullId}`;
+            return createResponse(JSON.stringify({
+                success: true,
+                src: returnLink,
+                fileUrl,
+                fullId
+            }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
         });
-
     } catch (error) {
         console.error('commitUpload error:', error.message);
         return createResponse(JSON.stringify({ error: error.message }), {
-            status: 500,
+            status: error.status === 409 ? 409 : 500,
             headers: { 'Content-Type': 'application/json' }
         });
     }

@@ -86,6 +86,37 @@ try {
     assert.equal((await kv.getWithMetadata('list/probe.png')).metadata.FileName, 'changed');
     console.log('PASS: compiled Worker rejects list-token metadata/index mutations and accepts manage-token control');
 
+    const admin = { Authorization: 'Bearer manage-fixture' };
+    const invalidAuth = { auth: { admin: { adminUsername: false } } };
+    const invalidUpdate = await req('/api/manage/sysConfig/security', { method: 'POST', headers: admin, body: JSON.stringify(invalidAuth) });
+    assert.equal(invalidUpdate.status, 400);
+    const invalidRestore = await req('/api/manage/batch/restore/chunk', { method: 'POST', headers: admin, body: JSON.stringify({
+        type: 'settings', data: { 'sysConfig@security': invalidAuth },
+    }) });
+    assert.equal(invalidRestore.status, 200);
+    assert.equal((await invalidRestore.json()).failedCount, 1);
+    assert.equal((await req('/api/manage/sysConfig/security', { headers: admin })).status, 200);
+    console.log('PASS: compiled Worker rejects corrupt security writes and preserves authentication');
+
+    const first = await upload('concurrent-a.txt', 'first', 'text/plain');
+    const second = await upload('concurrent-b.txt', 'second', 'text/plain');
+    const rename = path => req(path.replace('/file/', '/api/manage/rename/'), {
+        method: 'POST', headers: admin, body: JSON.stringify({ newFileId: 'contended.txt' }),
+    });
+    const r2 = await mf.getR2Bucket('img_r2');
+    const lockId = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('contended.txt'))).toString('hex');
+    const claim = `manage@file-mutation/lock/${lockId}`;
+    await r2.put(claim, 'a different writer');
+    assert.equal((await rename(first)).status, 409);
+    assert.equal(await (await r2.get(claim)).text(), 'a different writer');
+    await r2.delete(claim);
+    const outcomes = await Promise.all([rename(first), rename(second)]);
+    assert.deepEqual(outcomes.map(response => response.status).sort(), [200,409]);
+    const won = outcomes[0].status === 200;
+    assert.equal(await (await req('/file/contended.txt')).text(), won ? 'first' : 'second');
+    assert.equal(await (await req(won ? second : first)).text(), won ? 'second' : 'first');
+    console.log('PASS: compiled Worker honors R2 claims and preserves the losing source on collision');
+
     if (browser) {
         // If either an HTML document or an uploaded JS subresource executes,
         // it sets the flag. Also require an actual PNG decode as a control.

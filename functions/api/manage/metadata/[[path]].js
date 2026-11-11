@@ -1,4 +1,5 @@
 import { addFileToIndex } from '../../../utils/indexManager.js';
+import { withFileMutation } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { stripSensitiveMetadata } from '../../../utils/metadata/metadataSecurity.js';
 
@@ -71,42 +72,44 @@ export async function onRequest(context) {
             });
         }
 
-        const db = getDatabase(env);
+        return await withFileMutation(env, [fileId], async env => {
+            const db = getDatabase(env);
 
-        // 获取当前文件数据
-        const fileData = await db.getWithMetadata(fileId);
+            // 获取当前文件数据
+            const fileData = await db.getWithMetadata(fileId);
 
-        if (!fileData || !fileData.metadata) {
+            if (!fileData || !fileData.metadata) {
+                return new Response(JSON.stringify({
+                    success: false,
+                    message: 'File not found.',
+                }), {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+                });
+            }
+
+            // 合并允许更新的字段到现有 metadata
+            const updatedMetadata = { ...fileData.metadata };
+            if (typeof body.FileName === 'string') {
+                updatedMetadata.FileName = body.FileName;
+            }
+            if (typeof body.FileType === 'string') {
+                updatedMetadata.FileType = body.FileType;
+            }
+
+            // 保存更新后的 metadata
+            await db.put(fileId, fileData.value, { metadata: updatedMetadata });
+
+            // 更新索引
+            waitUntil(addFileToIndex(context, fileId, updatedMetadata));
+
             return new Response(JSON.stringify({
-                success: false,
-                message: 'File not found.',
+                success: true,
+                metadata: stripSensitiveMetadata(updatedMetadata),
             }), {
-                status: 404,
+                status: 200,
                 headers: { 'Content-Type': 'application/json', ...corsHeaders },
             });
-        }
-
-        // 合并允许更新的字段到现有 metadata
-        const updatedMetadata = { ...fileData.metadata };
-        if (typeof body.FileName === 'string') {
-            updatedMetadata.FileName = body.FileName;
-        }
-        if (typeof body.FileType === 'string') {
-            updatedMetadata.FileType = body.FileType;
-        }
-
-        // 保存更新后的 metadata
-        await db.put(fileId, fileData.value, { metadata: updatedMetadata });
-
-        // 更新索引
-        waitUntil(addFileToIndex(context, fileId, updatedMetadata));
-
-        return new Response(JSON.stringify({
-            success: true,
-            metadata: stripSensitiveMetadata(updatedMetadata),
-        }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
 
     } catch (error) {
@@ -115,7 +118,7 @@ export async function onRequest(context) {
             success: false,
             message: error.message || 'Internal server error.',
         }), {
-            status: 500,
+            status: error.status === 409 ? 409 : 500,
             headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
     }

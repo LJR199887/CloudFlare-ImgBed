@@ -1,3 +1,4 @@
+import { withFileMutation } from '../../../utils/fileMutation.js';
 import { purgeCFCache } from "../../../utils/purgeCache.js";
 import { addFileToIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from "../../../utils/databaseAdapter.js";
@@ -41,7 +42,7 @@ export async function onRequest(context) {
             return await handleGetTags(db, fileId);
         } else if (request.method === 'POST') {
             // Update tags for file
-            return await handleUpdateTags(context, db, fileId, url.hostname);
+            return await withFileMutation(env, [fileId], env => handleUpdateTags({ ...context, env }, getDatabase(env), fileId, url.hostname));
         } else {
             return new Response(JSON.stringify({
                 error: 'Method not allowed',
@@ -57,7 +58,7 @@ export async function onRequest(context) {
             error: 'Internal server error',
             message: error.message
         }), {
-            status: 500,
+            status: error.status === 409 ? 409 : 500,
             headers: { 'Content-Type': 'application/json' }
         });
     }

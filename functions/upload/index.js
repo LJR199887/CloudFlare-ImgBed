@@ -12,6 +12,7 @@ import { DiscordAPI } from "../utils/storage/discordAPI";
 import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { resolveFileType } from '../utils/mimeTypes.js';
 import { getWebDAVAccountId, hasWebDAVPassword } from '../utils/metadata/webdavIdentity.js';
@@ -194,6 +195,19 @@ async function processFileUpload(context, formdata = null) {
     // 构建文件ID
     const fullId = await buildUniqueFileId(context, fileName, fileType);
 
+    try {
+        return await withFileMutation(context.env, [fullId], async env => {
+            if (await getDatabase(env).get(fullId) != null) throw new FileMutationConflict();
+            return await storeUpload({ ...context, env }, uploadChannel, fullId, metadata, fileExt, fileName, fileType);
+        });
+    } catch (error) {
+        if (error.status === 409) return createResponse(error.message, { status: 409 });
+        throw error;
+    }
+}
+
+async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fileName, fileType) {
+    const { url } = context;
     // 获得返回链接格式, default为返回/file/id, full为返回完整链接
     const returnFormat = url.searchParams.get('returnFormat') || 'default';
     let returnLink = '';
@@ -296,9 +310,11 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
     const R2DataBase = env.img_r2;
 
     // 写入R2数据库
-    await R2DataBase.put(fullId, formdata.get('file'), {
+    const stored = await R2DataBase.put(fullId, formdata.get('file'), {
         httpMetadata: { contentType: metadata.FileType },
+        onlyIf: new Headers({ 'If-None-Match': '*' }),
     });
+    if (stored === null) throw new FileMutationConflict();
 
     // 更新metadata
     metadata.Channel = "CloudflareR2";

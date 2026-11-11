@@ -4,6 +4,8 @@
  * 接收并写入一批文件数据到 KV
  */
 
+import { withFileMutation } from '../../../../utils/fileMutation.js';
+import { parseSecuritySettings } from '../../../../utils/auth/securitySettings.js';
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
 import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
 import { needsChunkManifest, parseChunkManifest } from '../../../../utils/chunkManifest.js';
@@ -81,18 +83,21 @@ export async function onRequestPost(context) {
             throw new Error('Invalid file backup record');
           }
           if (needsChunkManifest(fileData.metadata)) parseChunkManifest(fileData.value, fileData.metadata);
-          await assertRestoredFileSafe(db, env, fileData.metadata);
-          if (fileData.value) {
-            // 有 value 的文件（如 Telegram/Discord 分块文件）
-            await db.put(key, fileData.value, {
-              metadata: fileData.metadata
-            });
-          } else if (fileData.metadata) {
-            // 只有元数据的文件
-            await db.put(key, '', {
-              metadata: fileData.metadata
-            });
-          }
+          await withFileMutation(env, [key], async env => {
+            const db = getDatabase(env);
+            await assertRestoredFileSafe(db, env, fileData.metadata);
+            if (fileData.value) {
+              // 有 value 的文件（如 Telegram/Discord 分块文件）
+              await db.put(key, fileData.value, {
+                metadata: fileData.metadata
+              });
+            } else if (fileData.metadata) {
+              // 只有元数据的文件
+              await db.put(key, '', {
+                metadata: fileData.metadata
+              });
+            }
+          });
           return { success: true };
         } catch (error) {
           return { success: false, key, error: error.message };
@@ -117,6 +122,7 @@ export async function onRequestPost(context) {
           const valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
           // 加回 manage@ 前缀
           const fullKey = key.startsWith('manage@') ? key : `manage@${key}`;
+          if (fullKey === 'manage@sysConfig@security') parseSecuritySettings(valueToStore);
           await db.put(fullKey, valueToStore);
           return { success: true };
         } catch (error) {

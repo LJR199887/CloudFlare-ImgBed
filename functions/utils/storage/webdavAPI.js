@@ -161,9 +161,13 @@ export class WebDAVAPI {
         // DELETE is idempotent for app semantics; a missing remote object should not block DB cleanup.
         if (response.status === 404) return true;
 
-        if (!isSuccessStatus(response.status)) {
+        if (![200, 204].includes(response.status)) {
             const detail = await safeReadResponseText(response);
-            throw new Error(`WebDAV DELETE failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            // 202 only acknowledges an asynchronous deletion; 207 may hide a
+            // per-resource failure. Neither confirms that the key is reusable.
+            const error = new Error(`WebDAV DELETE failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            error.status = response.status;
+            throw error;
         }
 
         return true;

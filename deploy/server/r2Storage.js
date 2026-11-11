@@ -19,6 +19,11 @@ export class LocalR2Storage {
         return join(this.basePath, key);
     }
 
+    async head(key) {
+        try { return { size: statSync(this._filePath(key)).size }; }
+        catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    }
+
     /**
      * 获取文件（模拟 R2 的 get 方法）
      * 支持 Range 请求
@@ -59,7 +64,7 @@ export class LocalR2Storage {
      * 存储文件（模拟 R2 的 put 方法）
      * 支持多种输入类型
      */
-    async put(key, value) {
+    async put(key, value, options) {
         const filePath = this._filePath(key);
         mkdirSync(dirname(filePath), { recursive: true });
 
@@ -85,7 +90,10 @@ export class LocalR2Storage {
             buffer = Buffer.from(String(value), 'utf-8');
         }
 
-        writeFileSync(filePath, buffer);
+        const createOnly = options?.onlyIf?.get?.('If-None-Match') === '*';
+        try { writeFileSync(filePath, buffer, { flag: createOnly ? 'wx' : 'w' }); }
+        catch (error) { if (createOnly && error.code === 'EEXIST') return null; throw error; }
+        return { size: buffer.length };
     }
 
     /**

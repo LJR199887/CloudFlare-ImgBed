@@ -1,3 +1,4 @@
+import { withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
 /* ========== 分块合并处理 ========== */
 import { createResponse, getUploadIp, getIPAddress, selectConsistentChannel, buildUniqueFileId, endUpload, sanitizeUploadFolder } from './uploadTools';
 import { retryFailedChunks, cleanupFailedMultipartUploads, checkChunkUploadStatuses, cleanupChunkData, cleanupUploadSession } from './chunkUpload';
@@ -70,6 +71,7 @@ export async function handleChunkMerge(context) {
         return await startMerge(context, uploadId, totalChunks, originalFileName, originalFileType, uploadChannel);
 
     } catch (error) {
+        if (error.status === 409) return createResponse(error.message, { status: 409 });
         // 清理失败的multipart uploads
         if (uploadChannel === 'cfr2' || uploadChannel === 's3') {
             waitUntil(cleanupFailedMultipartUploads(context, uploadId, uploadChannel));
@@ -123,6 +125,7 @@ async function startMerge(context, uploadId, totalChunks, originalFileName, orig
         }
 
     } catch (error) {
+        if (error.status === 409) return createResponse(error.message, { status: 409 });
         // 清理失败的multipart uploads
         if (uploadChannel === 'cfr2' || uploadChannel === 's3') {
             await cleanupFailedMultipartUploads(context, uploadId, uploadChannel);
@@ -222,6 +225,7 @@ async function handleChannelBasedMerge(context, uploadId, totalChunks, originalF
         return result;
 
     } catch (error) {
+        if (error.status === 409) throw error;
         return {
             success: false,
             error: error.message
@@ -258,55 +262,61 @@ async function mergeR2ChunksInfo(context, uploadId, completedChunks, metadata) {
             parts.push(part);
         }
 
-        // 完成multipart upload
-        const multipartUpload = R2DataBase.resumeMultipartUpload(multipartInfo.key, multipartInfo.uploadId);
-        await multipartUpload.complete(parts);
+        return await withFileMutation(env, [multipartInfo.key], async env => {
+            const db = getDatabase(env);
+            if (await db.get(multipartInfo.key) != null) throw new FileMutationConflict();
+            if (await R2DataBase.head?.(multipartInfo.key)) throw new FileMutationConflict();
+            // 完成multipart upload
+            const multipartUpload = R2DataBase.resumeMultipartUpload(multipartInfo.key, multipartInfo.uploadId);
+            await multipartUpload.complete(parts);
 
-        // 计算总大小
-        const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);
+            // 计算总大小
+            const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);
 
-        // 使用multipart info中的finalFileId更新metadata
-        const finalFileId = multipartInfo.key;
-        metadata.Channel = "CloudflareR2";
-        // 从 R2 设置中获取渠道名称（优先使用指定的渠道名称）
-        const r2Settings = context.uploadConfig.cfr2;
-        let r2ChannelName = "R2_env";
-        if (specifiedChannelName) {
-            const r2Channel = r2Settings.channels?.find(ch => ch.name === specifiedChannelName);
-            if (r2Channel) {
-                r2ChannelName = r2Channel.name;
+            // 使用multipart info中的finalFileId更新metadata
+            const finalFileId = multipartInfo.key;
+            metadata.Channel = "CloudflareR2";
+            // 从 R2 设置中获取渠道名称（优先使用指定的渠道名称）
+            const r2Settings = context.uploadConfig.cfr2;
+            let r2ChannelName = "R2_env";
+            if (specifiedChannelName) {
+                const r2Channel = r2Settings.channels?.find(ch => ch.name === specifiedChannelName);
+                if (r2Channel) {
+                    r2ChannelName = r2Channel.name;
+                }
+            } else if (r2Settings.channels?.[0]?.name) {
+                r2ChannelName = r2Settings.channels[0].name;
             }
-        } else if (r2Settings.channels?.[0]?.name) {
-            r2ChannelName = r2Settings.channels[0].name;
-        }
-        metadata.ChannelName = r2ChannelName;
-        metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
-        metadata.FileSizeBytes = totalSize;
+            metadata.ChannelName = r2ChannelName;
+            metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
+            metadata.FileSizeBytes = totalSize;
 
-        // 清理multipart info
-        await db.delete(multipartKey);
+            // 清理multipart info
+            await db.delete(multipartKey);
 
-        // 写入数据库
-        await db.put(finalFileId, "", { metadata });
+            // 写入数据库
+            await db.put(finalFileId, "", { metadata });
 
-        // 结束上传
-        waitUntil(endUpload(context, finalFileId, metadata));
+            // 结束上传
+            waitUntil(endUpload(context, finalFileId, metadata));
 
-        // 更新返回链接
-        const returnFormat = url.searchParams.get('returnFormat') || 'default';
-        let updatedReturnLink = '';
-        if (returnFormat === 'full') {
-            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
-        } else {
-            updatedReturnLink = `/file/${finalFileId}`;
-        }
+            // 更新返回链接
+            const returnFormat = url.searchParams.get('returnFormat') || 'default';
+            let updatedReturnLink = '';
+            if (returnFormat === 'full') {
+                updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
+            } else {
+                updatedReturnLink = `/file/${finalFileId}`;
+            }
 
-        return {
-            success: true,
-            result: [{ 'src': updatedReturnLink }]
-        };
+            return {
+                success: true,
+                result: [{ 'src': updatedReturnLink }]
+            };
 
+        });
     } catch (error) {
+        if (error.status === 409) throw error;
         throw new Error(`R2 merge failed: ${error.message}`);
     }
 }
@@ -362,60 +372,65 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
             parts.push(part);
         }
 
-        // 完成multipart upload
-        await s3Client.send(new CompleteMultipartUploadCommand({
-            Bucket: bucketName,
-            Key: multipartInfo.key,
-            UploadId: multipartInfo.uploadId,
-            MultipartUpload: { Parts: parts }
-        }));
+        return await withFileMutation(env, [multipartInfo.key], async env => {
+            const db = getDatabase(env);
+            if (await db.get(multipartInfo.key) != null) throw new FileMutationConflict();
+            // 完成multipart upload
+            await s3Client.send(new CompleteMultipartUploadCommand({
+                Bucket: bucketName,
+                Key: multipartInfo.key,
+                UploadId: multipartInfo.uploadId,
+                MultipartUpload: { Parts: parts }
+            }));
 
-        // 计算总大小
-        const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);
+            // 计算总大小
+            const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);
 
-        // 使用multipart info中的finalFileId更新metadata
-        const finalFileId = multipartInfo.key;
-        metadata.Channel = "S3";
-        metadata.ChannelName = s3Channel.name;
-        metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
-        metadata.FileSizeBytes = totalSize;
+            // 使用multipart info中的finalFileId更新metadata
+            const finalFileId = multipartInfo.key;
+            metadata.Channel = "S3";
+            metadata.ChannelName = s3Channel.name;
+            metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
+            metadata.FileSizeBytes = totalSize;
 
-        const s3ServerDomain = endpoint.replace(/https?:\/\//, "");
-        if (pathStyle) {
-            metadata.S3Location = `https://${s3ServerDomain}/${bucketName}/${finalFileId}`;
-        } else {
-            metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${finalFileId}`;
-        }
-        metadata.S3Endpoint = endpoint;
-        metadata.S3PathStyle = pathStyle;
-        metadata.S3Region = region || "auto";
-        metadata.S3BucketName = bucketName;
-        metadata.S3FileKey = finalFileId;
+            const s3ServerDomain = endpoint.replace(/https?:\/\//, "");
+            if (pathStyle) {
+                metadata.S3Location = `https://${s3ServerDomain}/${bucketName}/${finalFileId}`;
+            } else {
+                metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${finalFileId}`;
+            }
+            metadata.S3Endpoint = endpoint;
+            metadata.S3PathStyle = pathStyle;
+            metadata.S3Region = region || "auto";
+            metadata.S3BucketName = bucketName;
+            metadata.S3FileKey = finalFileId;
 
-        // 清理multipart info
-        await db.delete(multipartKey);
+            // 清理multipart info
+            await db.delete(multipartKey);
 
-        // 写入数据库
-        await db.put(finalFileId, "", { metadata });
+            // 写入数据库
+            await db.put(finalFileId, "", { metadata });
 
-        // 异步结束上传
-        waitUntil(endUpload(context, finalFileId, metadata));
+            // 异步结束上传
+            waitUntil(endUpload(context, finalFileId, metadata));
 
-        // 更新返回链接
-        const returnFormat = url.searchParams.get('returnFormat') || 'default';
-        let updatedReturnLink = '';
-        if (returnFormat === 'full') {
-            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
-        } else {
-            updatedReturnLink = `/file/${finalFileId}`;
-        }
+            // 更新返回链接
+            const returnFormat = url.searchParams.get('returnFormat') || 'default';
+            let updatedReturnLink = '';
+            if (returnFormat === 'full') {
+                updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
+            } else {
+                updatedReturnLink = `/file/${finalFileId}`;
+            }
 
-        return {
-            success: true,
-            result: [{ src: updatedReturnLink }]
-        };
+            return {
+                success: true,
+                result: [{ src: updatedReturnLink }]
+            };
 
+        });
     } catch (error) {
+        if (error.status === 409) throw error;
         throw new Error(`S3 merge failed: ${error.message}`);
     }
 }
@@ -423,7 +438,6 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
 // 合并Telegram分块信息
 async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metadata) {
     const { env, waitUntil, uploadConfig, url, specifiedChannelName } = context;
-    const db = getDatabase(env);
 
     try {
         const tgSettings = uploadConfig.telegram;
@@ -460,41 +474,46 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         // 生成 finalFileId
         const finalFileId = await buildUniqueFileId(context, metadata.FileName, metadata.FileType);
 
-        // 更新metadata
-        metadata.Channel = "TelegramNew";
-        metadata.ChannelName = tgChannel.name;
-        metadata.TgChatId = tgChatId;
-        if (/^\d+:/.test(tgBotToken)) metadata.TgBotId = String(tgBotToken).split(':')[0];
-        metadata.TgProxyUrl = tgChannel.proxyUrl || '';
-        metadata.IsChunked = true;
-        metadata.TotalChunks = completedChunks.length;
-        metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
-        metadata.FileSizeBytes = totalSize;
+        return await withFileMutation(env, [finalFileId], async env => {
+            const db = getDatabase(env);
+            if (await db.get(finalFileId) != null) throw new FileMutationConflict();
+            // 更新metadata
+            metadata.Channel = "TelegramNew";
+            metadata.ChannelName = tgChannel.name;
+            metadata.TgChatId = tgChatId;
+            if (/^\d+:/.test(tgBotToken)) metadata.TgBotId = String(tgBotToken).split(':')[0];
+            metadata.TgProxyUrl = tgChannel.proxyUrl || '';
+            metadata.IsChunked = true;
+            metadata.TotalChunks = completedChunks.length;
+            metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
+            metadata.FileSizeBytes = totalSize;
 
-        // 将分片信息存储到value中
-        const chunksData = JSON.stringify(chunks);
+            // 将分片信息存储到value中
+            const chunksData = JSON.stringify(chunks);
 
-        // 写入数据库
-        await db.put(finalFileId, chunksData, { metadata });
+            // 写入数据库
+            await db.put(finalFileId, chunksData, { metadata });
 
-        // 异步结束上传
-        waitUntil(endUpload(context, finalFileId, metadata));
+            // 异步结束上传
+            waitUntil(endUpload(context, finalFileId, metadata));
 
-        // 生成返回链接
-        const returnFormat = url.searchParams.get('returnFormat') || 'default';
-        let updatedReturnLink = '';
-        if (returnFormat === 'full') {
-            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
-        } else {
-            updatedReturnLink = `/file/${finalFileId}`;
-        }
+            // 生成返回链接
+            const returnFormat = url.searchParams.get('returnFormat') || 'default';
+            let updatedReturnLink = '';
+            if (returnFormat === 'full') {
+                updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
+            } else {
+                updatedReturnLink = `/file/${finalFileId}`;
+            }
 
-        return {
-            success: true,
-            result: [{ 'src': updatedReturnLink }]
-        };
+            return {
+                success: true,
+                result: [{ 'src': updatedReturnLink }]
+            };
 
+        });
     } catch (error) {
+        if (error.status === 409) throw error;
         throw new Error(`Telegram merge failed: ${error.message}`);
     }
 }
@@ -502,7 +521,6 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
 // 合并Discord分块信息
 async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metadata) {
     const { env, waitUntil, uploadConfig, url, specifiedChannelName } = context;
-    const db = getDatabase(env);
 
     try {
         const discordSettings = uploadConfig.discord;
@@ -540,40 +558,45 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
         // 生成 finalFileId
         const finalFileId = await buildUniqueFileId(context, metadata.FileName, metadata.FileType);
 
-        // 更新metadata
-        metadata.Channel = "Discord";
-        metadata.ChannelName = discordChannel.name;
-        metadata.DiscordChannelId = channelId;
-        metadata.DiscordProxyUrl = discordChannel.proxyUrl || '';
-        metadata.IsChunked = true;
-        metadata.TotalChunks = completedChunks.length;
-        metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
-        metadata.FileSizeBytes = totalSize;
+        return await withFileMutation(env, [finalFileId], async env => {
+            const db = getDatabase(env);
+            if (await db.get(finalFileId) != null) throw new FileMutationConflict();
+            // 更新metadata
+            metadata.Channel = "Discord";
+            metadata.ChannelName = discordChannel.name;
+            metadata.DiscordChannelId = channelId;
+            metadata.DiscordProxyUrl = discordChannel.proxyUrl || '';
+            metadata.IsChunked = true;
+            metadata.TotalChunks = completedChunks.length;
+            metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
+            metadata.FileSizeBytes = totalSize;
 
-        // 将分片信息存储到value中
-        const chunksData = JSON.stringify(chunks);
+            // 将分片信息存储到value中
+            const chunksData = JSON.stringify(chunks);
 
-        // 写入数据库
-        await db.put(finalFileId, chunksData, { metadata });
+            // 写入数据库
+            await db.put(finalFileId, chunksData, { metadata });
 
-        // 异步结束上传
-        waitUntil(endUpload(context, finalFileId, metadata));
+            // 异步结束上传
+            waitUntil(endUpload(context, finalFileId, metadata));
 
-        // 生成返回链接
-        const returnFormat = url.searchParams.get('returnFormat') || 'default';
-        let updatedReturnLink = '';
-        if (returnFormat === 'full') {
-            updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
-        } else {
-            updatedReturnLink = `/file/${finalFileId}`;
-        }
+            // 生成返回链接
+            const returnFormat = url.searchParams.get('returnFormat') || 'default';
+            let updatedReturnLink = '';
+            if (returnFormat === 'full') {
+                updatedReturnLink = `https://${url.host}/file/${finalFileId}`;
+            } else {
+                updatedReturnLink = `/file/${finalFileId}`;
+            }
 
-        return {
-            success: true,
-            result: [{ 'src': updatedReturnLink }]
-        };
+            return {
+                success: true,
+                result: [{ 'src': updatedReturnLink }]
+            };
 
+        });
     } catch (error) {
+        if (error.status === 409) throw error;
         throw new Error(`Discord merge failed: ${error.message}`);
     }
 }
