@@ -38,6 +38,21 @@ function kvDefinitelyRejected(error, method) {
 const reserveTable = 'CREATE TABLE IF NOT EXISTS file_mutation_claims (id TEXT PRIMARY KEY, owner TEXT NOT NULL)';
 const absent = new Headers({ 'If-None-Match': '*' });
 
+function assertKVFileRecordFits(id, metadata) {
+    const encoder = new TextEncoder();
+    if (encoder.encode(id).byteLength > 512 || encoder.encode(JSON.stringify(metadata)).byteLength > 1024) {
+        throw Object.assign(new Error('File ID or metadata exceeds the KV limit'), { status: 413 });
+    }
+}
+
+// Call with the same redacted metadata that the adapter will persist. A UUID
+// placeholder has exactly the size of the generation added by fencedKV.
+export function preflightFileMutationWrite(env, id, metadata) {
+    if (typeof env.img_url?.get !== 'function') return;
+    const fenced = typeof env.img_r2?.head === 'function' || typeof env.img_d1?.prepare === 'function';
+    assertKVFileRecordFits(id, fenced ? { ...metadata, FileMutationGeneration: '00000000-0000-0000-0000-000000000000' } : metadata);
+}
+
 async function keyHash(id) {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(id));
     return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -144,9 +159,7 @@ async function fencedKV(env, ids) {
                 if (!entry || !options.metadata) return target.put(id, value, options);
                 const generation = entry.generation ||= crypto.randomUUID();
                 const metadata = { ...options.metadata, FileMutationGeneration: generation };
-                if (new TextEncoder().encode(JSON.stringify(metadata)).byteLength > 1024) {
-                    throw Object.assign(new Error('File metadata exceeds the KV limit (1024 bytes including its version)'), { status: 413 });
-                }
+                assertKVFileRecordFits(id, metadata);
                 // If a write is ambiguous, the next writer refuses until the
                 // generation is visible; never silently release it as empty.
                 const result = await writeWithFence(entry, generation, 'PUT', () => target.put(id, value, { ...options, metadata }));

@@ -7,6 +7,8 @@
 import Database from 'better-sqlite3';
 
 export class SqliteD1 {
+    get isLocalSQLite() { return true; }
+
     constructor(dbPath) {
         this.db = new Database(dbPath);
         this.db.pragma('journal_mode = WAL');

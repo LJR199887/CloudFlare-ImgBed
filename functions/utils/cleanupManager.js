@@ -5,6 +5,9 @@ import { getDatabase } from './databaseAdapter.js';
 const CONFIG_KEY = 'manage@sysConfig@cleanup';
 const STATUS_KEY = 'manage@sysConfig@cleanupStatus';
 const MAX_LOG_ENTRIES = 30;
+// Allow the most expensive storage channel to finish each claimed deletion,
+// including the database delete, cache config, claim release, and final status.
+const MAX_WORKER_D1_DELETIONS = 4;
 const DEFAULT_CONFIG = {
     enabled: false,
     dryRun: true,
@@ -153,6 +156,10 @@ async function listExpiredFiles(env, config, cutoff) {
 
 export async function runCleanup(context, options = {}) {
     const { env } = context;
+    if (typeof env.img_d1?.prepare !== 'function' || typeof env.img_url?.get === 'function') {
+        return { success: false, error: 'Automatic cleanup requires D1 or Docker SQLite as the primary database' };
+    }
+    const workerD1 = env.img_d1.isLocalSQLite !== true;
     const config = normalizeCleanupConfig({
         ...await getCleanupConfig(env),
         ...options.config,
@@ -198,7 +205,9 @@ export async function runCleanup(context, options = {}) {
         result.matched = expired.selected.length;
 
         if (!config.dryRun) {
-            for (const row of expired.selected) {
+            const selected = workerD1 ? expired.selected.slice(0, MAX_WORKER_D1_DELETIONS) : expired.selected;
+            result.deferred = expired.selected.length - selected.length;
+            for (const row of selected) {
                 const fileId = row.id;
                 const expected = JSON.stringify(JSON.parse(row.metadata || '{}'));
                 const cdnUrl = `${url.origin}/file/${fileId}`;
@@ -212,8 +221,13 @@ export async function runCleanup(context, options = {}) {
             }
 
             if (deletedFileIds.length > 0) {
-                await batchRemoveFilesFromIndex(context, deletedFileIds);
-                await mergeOperationsToIndex(context);
+                const indexOperation = await batchRemoveFilesFromIndex(context, deletedFileIds);
+                if (indexOperation?.success === false) throw new Error(indexOperation.error || 'Failed to queue index removal');
+                // Index rebuild/merge has unbounded query cost. Worker reads
+                // already apply pending operations; leave that work out of the
+                // destructive invocation and reserve the status write.
+                if (workerD1) result.indexUpdatePending = true;
+                else await mergeOperationsToIndex(context);
             }
         }
 

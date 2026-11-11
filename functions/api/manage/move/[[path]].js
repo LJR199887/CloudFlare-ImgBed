@@ -1,7 +1,8 @@
+import { prepareMetadataForStorage } from '../../../utils/metadata/webdavIdentity.js';
 import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { moveFileInIndex, batchMoveFilesInIndex } from "../../../utils/indexManager.js";
-import { deletionMayStillApply, guardProviderWrite, withFileMutation, FileMutationConflict } from '../../../utils/fileMutation.js';
+import { deletionMayStillApply, guardProviderWrite, preflightFileMutationWrite, withFileMutation, FileMutationConflict } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
@@ -148,25 +149,28 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
             img.metadata = await hydrateFileCredentials(env, img.metadata);
 
             // Keep the source usable until the destination record is committed.
+            let copyDestination = async () => {};
             let deleteSource = async () => {};
 
             // 如果是R2渠道的图片，需要移动R2中对应的图片
             if (img.metadata?.Channel === 'CloudflareR2') {
                 const R2DataBase = env.img_r2;
 
-                // 获取原文件内容
-                const object = await R2DataBase.get(fileId);
-                if (!object) {
-                    throw new Error('R2 Object Not Found');
-                }
+                copyDestination = async () => {
+                    // 获取原文件内容
+                    const object = await R2DataBase.get(fileId);
+                    if (!object) {
+                        throw new Error('R2 Object Not Found');
+                    }
 
-                // 复制到新位置
-                const copied = await R2DataBase.put(newFileId, object.body, {
-                    httpMetadata: object.httpMetadata,
-                    customMetadata: object.customMetadata,
-                    onlyIf: new Headers({ 'If-None-Match': '*' }),
-                });
-                if (copied === null) throw new FileMutationConflict();
+                    // 复制到新位置
+                    const copied = await R2DataBase.put(newFileId, object.body, {
+                        httpMetadata: object.httpMetadata,
+                        customMetadata: object.customMetadata,
+                        onlyIf: new Headers({ 'If-None-Match': '*' }),
+                    });
+                    if (copied === null) throw new FileMutationConflict();
+                };
 
                 // 删除旧文件
                 deleteSource = () => R2DataBase.delete(fileId);
@@ -174,28 +178,22 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
 
             // S3 渠道的图片，需要移动S3中对应的图片
             if (img.metadata?.Channel === 'S3') {
-                const { success, newKey, error, cleanup } = await copyS3File(img, newFileId, () => retainClaim(newFileId));
-                if (success) {
-                    deleteSource = cleanup;
-                    // 更新 metadata
-                    // The old CDN URL could serve a different file once the old key is reused.
-                    if (img.metadata.S3FileKey !== newFileId) delete img.metadata.S3CdnFileUrl;
-                    img.metadata.S3FileKey = newFileId;
-
-                    const s3ServerDomain = img.metadata.S3Endpoint.replace(/https?:\/\//, "");
-                    img.metadata.S3Location = `https://${img.metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
-                } else {
-                    throw new Error(error || 'S3 Move Failed');
-                }
+                const plan = planS3Copy(img, newFileId, () => retainClaim(newFileId));
+                copyDestination = plan.copy;
+                deleteSource = plan.cleanup;
+                // The old CDN URL could serve another file when the source key is reused.
+                if (img.metadata.S3FileKey !== newFileId) delete img.metadata.S3CdnFileUrl;
+                img.metadata.S3FileKey = newFileId;
+                const s3ServerDomain = img.metadata.S3Endpoint.replace(/https?:\/\//, "");
+                img.metadata.S3Location = `https://${img.metadata.S3BucketName}.${s3ServerDomain}/${newFileId}`;
             }
 
             // WebDAV 渠道的图片，需要移动 WebDAV 中对应的文件
             if (img.metadata?.Channel === 'WebDAV') {
-                const { success, error, webdavConfig, cleanup } = await copyWebDAVFile(env, img, newFileId);
-                if (!success) {
-                    throw new Error(error || 'WebDAV Move Failed');
-                }
-                deleteSource = cleanup;
+                const plan = await planWebDAVCopy(env, img, newFileId);
+                const { webdavConfig } = plan;
+                copyDestination = plan.copy;
+                deleteSource = plan.cleanup;
                 img.metadata.WebDAVFilePath = newFileId;
                 if (img.metadata.WebDAVPublicBaseUrl || img.metadata.WebDAVPublicUrl || webdavConfig?.publicUrl) {
                     const webdavAPI = new WebDAVAPI(webdavConfig || { baseUrl: img.metadata.WebDAVBaseUrl });
@@ -217,6 +215,9 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
             img.metadata.Directory = DirectoryPath;
 
             // 更新KV存储
+            const persistedMetadata = await prepareMetadataForStorage(img.metadata);
+            preflightFileMutationWrite(env, newFileId, persistedMetadata);
+            await copyDestination();
             await db.put(newFileId, img.value, { metadata: img.metadata });
 
             // Do not release the source name while its object deletion is pending:
@@ -254,59 +255,34 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
 }
 
 // 移动 S3 渠道的图片
-async function copyS3File(img, newFileId, retainDestination) {
+function planS3Copy(img, newFileId, retainDestination) {
+    const m = img.metadata;
+    const oldKey = m.S3FileKey;
+    if (oldKey === newFileId) return { copy: async () => {}, cleanup: async () => {} };
     const s3Client = new S3Client({
-        region: img.metadata?.S3Region || "auto",
-        endpoint: img.metadata?.S3Endpoint,
-        credentials: {
-            accessKeyId: img.metadata?.S3AccessKeyId,
-            secretAccessKey: img.metadata?.S3SecretAccessKey
-        },
-        forcePathStyle: img.metadata?.S3PathStyle || false // 是否启用路径风格
+        region: m.S3Region || 'auto',
+        endpoint: m.S3Endpoint,
+        credentials: { accessKeyId: m.S3AccessKeyId, secretAccessKey: m.S3SecretAccessKey },
+        forcePathStyle: m.S3PathStyle || false,
     });
-
-    const bucketName = img.metadata?.S3BucketName;
-    const oldKey = img.metadata?.S3FileKey;
-    const newKey = newFileId;
-
-    try {
-        if (oldKey === newKey) return { success: true, newKey, cleanup: async () => {} };
-        // 复制文件到新位置
-        await guardProviderWrite(() => s3Client.send(new CopyObjectCommand({
-            Bucket: bucketName,
-            CopySource: `/${bucketName}/${oldKey.split('/').map(encodeURIComponent).join('/')}`,
-            Key: newKey,
-        })), retainDestination);
-
-        return { success: true, newKey, cleanup: () => s3Client.send(new DeleteObjectCommand({
-            Bucket: bucketName, Key: oldKey,
-        })) };
-    } catch (error) {
-        console.error("S3 Move Failed:", error);
-        return { success: false, error: error.message };
-    }
+    const source = `/${m.S3BucketName}/${oldKey.split('/').map(encodeURIComponent).join('/')}`;
+    return {
+        copy: () => guardProviderWrite(() => s3Client.send(new CopyObjectCommand({
+            Bucket: m.S3BucketName, CopySource: source, Key: newFileId,
+        })), retainDestination),
+        cleanup: () => s3Client.send(new DeleteObjectCommand({ Bucket: m.S3BucketName, Key: oldKey })),
+    };
 }
 
-// 移动 WebDAV 渠道的图片
-async function copyWebDAVFile(env, img, newFileId) {
-    const oldPath = img.metadata?.WebDAVFilePath;
-
-    if (!oldPath) {
-        return { success: false, error: 'WebDAV file missing required metadata for move' };
-    }
-
-    try {
-        const webdavConfig = await resolveWebDAVConfig(env, img.metadata);
-        if (!webdavConfig) {
-            return { success: false, error: 'WebDAV channel config not found for move' };
-        }
-
-        const webdavAPI = new WebDAVAPI(webdavConfig);
-        if (oldPath !== newFileId) await webdavAPI.copyFile(oldPath, newFileId, false);
-        return { success: true, newKey: newFileId, webdavConfig,
-            cleanup: () => oldPath === newFileId ? Promise.resolve() : webdavAPI.deleteFile(oldPath) };
-    } catch (error) {
-        console.error("WebDAV Move Failed:", error);
-        return { success: false, error: error.message };
-    }
+async function planWebDAVCopy(env, img, newFileId) {
+    const oldPath = img.metadata.WebDAVFilePath;
+    if (!oldPath) throw new Error('WebDAV file missing required metadata for move');
+    const webdavConfig = await resolveWebDAVConfig(env, img.metadata);
+    if (!webdavConfig) throw new Error('WebDAV channel config not found for move');
+    const webdavAPI = new WebDAVAPI(webdavConfig);
+    return {
+        webdavConfig,
+        copy: () => oldPath === newFileId ? Promise.resolve() : webdavAPI.copyFile(oldPath, newFileId, false),
+        cleanup: () => oldPath === newFileId ? Promise.resolve() : webdavAPI.deleteFile(oldPath),
+    };
 }

@@ -77,7 +77,8 @@ export async function validateSession(env, request, authType) {
         if (session.authType !== authType) {
             return { valid: false };
         }
-        if (Date.now() > session.expiresAt) {
+        if (!Number.isFinite(session.expiresAt)) return { valid: false };
+        if (Date.now() >= session.expiresAt) {
             await db.delete(`${SESSION_PREFIX}${token}`);
             return { valid: false };
         }

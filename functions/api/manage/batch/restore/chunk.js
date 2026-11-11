@@ -7,6 +7,7 @@ import { isSafeFileId } from '../../../../utils/fileId.js';
 
 import { withFileMutation } from '../../../../utils/fileMutation.js';
 import { parseSecuritySettings } from '../../../../utils/auth/securitySettings.js';
+import { isBackupSettingKey } from '../../../../utils/backupSettings.js';
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
 import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
 import { needsChunkManifest, parseChunkManifest } from '../../../../utils/chunkManifest.js';
@@ -120,6 +121,12 @@ export async function onRequestPost(context) {
         }
       }
     } else if (type === 'settings') {
+      const normalizeKey = key => key.startsWith('manage@') ? key : `manage@${key}`;
+      const occurrences = new Map();
+      for (const key of Object.keys(data)) {
+        const fullKey = normalizeKey(key);
+        occurrences.set(fullKey, (occurrences.get(fullKey) || 0) + 1);
+      }
       // 恢复系统设置 - 并行写入
       // 备份时移除了 manage@ 前缀，恢复时需要加回来
       const settingPromises = Object.entries(data).map(async ([key, value]) => {
@@ -127,8 +134,9 @@ export async function onRequestPost(context) {
           // 设置值可能是对象或字符串
           const valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
           // 加回 manage@ 前缀
-          const fullKey = key.startsWith('manage@') ? key : `manage@${key}`;
-          if (fullKey.startsWith('manage@hf-upload@')) throw new Error('Upload grants cannot be restored');
+          const fullKey = normalizeKey(key);
+          if (!isBackupSettingKey(fullKey)) throw new Error('Not a portable backup setting');
+          if (occurrences.get(fullKey) !== 1) throw new Error('Duplicate backup setting');
           if (fullKey === 'manage@sysConfig@security') parseSecuritySettings(valueToStore);
           await db.put(fullKey, valueToStore);
           return { success: true };

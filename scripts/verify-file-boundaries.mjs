@@ -109,6 +109,19 @@ try {
     assert.equal((await req('/api/manage/sysConfig/security', { headers: admin })).status, 200);
     console.log('PASS: compiled Worker rejects corrupt security writes and preserves authentication');
 
+    const restoredCookie = { Cookie: 'admin_session=restored-fixture' };
+    const securityWithCookie = () => req('/api/manage/sysConfig/security', { headers: restoredCookie });
+    assert.equal((await securityWithCookie()).status, 401);
+    const runtimeRestore = await req('/api/manage/batch/restore/chunk', { method:'POST', headers:admin, body:JSON.stringify({
+        type:'settings', data:{ 'session@restored-fixture': { authType:'admin', expiresAt:Date.now()+3600000 } },
+    }) });
+    assert.equal((await runtimeRestore.json()).failedCount,1);
+    assert.equal(await kv.get('manage@session@restored-fixture'),null);
+    assert.equal((await securityWithCookie()).status,401);
+    await kv.put('manage@session@restored-fixture',JSON.stringify({authType:'admin'}));
+    assert.equal((await securityWithCookie()).status,401);
+    console.log('PASS: compiled Worker rejects session restore and missing session expiration');
+
     const first = await upload('concurrent-a.txt', 'first', 'text/plain');
     const second = await upload('concurrent-b.txt', 'second', 'text/plain');
     const rename = path => req(path.replace('/file/', '/api/manage/rename/'), {
@@ -136,6 +149,28 @@ try {
     assert.equal((await changeName('short.txt')).status,200);
     assert.equal((await kv.getWithMetadata('near-limit.txt')).metadata.FileName,'short.txt');
     console.log('PASS: rejected KV metadata does not poison the file generation');
+
+    for (const action of ['move','rename']) {
+        const source = `preflight-${action}.txt`;
+        const folder = 'x'.repeat(100);
+        const target = `${folder}/${source}`;
+        await kv.put(source,'',{metadata:{Channel:'CloudflareR2',FileName:'x'.repeat(860)+'.txt',FileType:'text/plain',Directory:''}});
+        await r2.put(source,'original bytes');
+        const relocate = () => req(`/api/manage/${action}/${source}?dist=${folder}`,{
+            method:'POST',headers:admin,body:JSON.stringify({newFileId:target}),
+        });
+        assert.notEqual((await relocate()).status,200);
+        assert.equal(await kv.get(target),null);
+        assert.equal(await r2.head(target),null,'validation must run before copying the target');
+        assert.equal(await (await r2.get(source)).text(),'original bytes');
+        assert.equal((await req(`/api/manage/metadata/${source}`,{
+            method:'PATCH',headers:admin,body:JSON.stringify({FileName:'short.txt'}),
+        })).status,200);
+        assert.equal((await relocate()).status,200);
+        assert.equal(await (await r2.get(target)).text(),'original bytes');
+        assert.equal(await r2.head(source),null);
+    }
+    console.log('PASS: move and rename preflight prevents orphaned R2 targets and permits a corrected retry');
 
     const hfPost = (route, body) => req(`/upload/huggingface/${route}`, {
         method:'POST',headers:{Authorization:'Bearer upload-fixture'},body:JSON.stringify(body),
