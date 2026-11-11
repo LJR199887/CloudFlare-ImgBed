@@ -83,6 +83,21 @@ describe('shipped frontend restore workflow', () => {
             assert.equal((await processor.restore({ data: { files: { 'bad.png': { metadata: {} } } } })).failedFiles, 1);
             assert.ok(progress.every(p => p.percentage == null || (Number.isFinite(p.percentage) && p.percentage <= 100)));
         });
+
+        it(`${bundled ? 'bundle' : 'source'}: default restore batches obey the D1 file limit`, async t => {
+            const { env } = databaseFixture(t, 'D1');
+            const route = await loadFunction('functions/api/manage/batch/restore/chunk.js', { getDatabase: createDatabaseAdapter, assertRestoredFileSafe });
+            const sizes = [];
+            const Processor = await processorClass(bundled, async (url, options) => {
+                sizes.push(Object.keys(JSON.parse(options.body).data).length);
+                return route.onRequestPost({ env, request: new Request(`https://img.example${url}`, options) });
+            });
+            const files = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}.txt`, { metadata: { Channel: 'CloudflareR2' } }]));
+            const result = await new Processor().restore({ data: { files } });
+            assert.deepEqual(sizes, [5,5,2]);
+            assert.equal(result.restoredFiles, 12);
+            assert.equal(result.failedFiles, 0);
+        });
     }
 
     it('keeps all HTML local JS references present after hash updates', async () => {

@@ -1,4 +1,4 @@
-import { withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
+import { guardProviderWrite, withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
 /* ========== 分块合并处理 ========== */
 import { createResponse, getUploadIp, getIPAddress, selectConsistentChannel, buildUniqueFileId, endUpload, sanitizeUploadFolder } from './uploadTools';
 import { retryFailedChunks, cleanupFailedMultipartUploads, checkChunkUploadStatuses, cleanupChunkData, cleanupUploadSession } from './chunkUpload';
@@ -262,13 +262,13 @@ async function mergeR2ChunksInfo(context, uploadId, completedChunks, metadata) {
             parts.push(part);
         }
 
-        return await withFileMutation(env, [multipartInfo.key], async env => {
+        return await withFileMutation(env, [multipartInfo.key], async (env, retainClaim) => {
             const db = getDatabase(env);
             if (await db.get(multipartInfo.key) != null) throw new FileMutationConflict();
             if (await R2DataBase.head?.(multipartInfo.key)) throw new FileMutationConflict();
             // 完成multipart upload
             const multipartUpload = R2DataBase.resumeMultipartUpload(multipartInfo.key, multipartInfo.uploadId);
-            await multipartUpload.complete(parts);
+            await guardProviderWrite(() => multipartUpload.complete(parts), () => retainClaim(multipartInfo.key));
 
             // 计算总大小
             const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);
@@ -372,16 +372,16 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
             parts.push(part);
         }
 
-        return await withFileMutation(env, [multipartInfo.key], async env => {
+        return await withFileMutation(env, [multipartInfo.key], async (env, retainClaim) => {
             const db = getDatabase(env);
             if (await db.get(multipartInfo.key) != null) throw new FileMutationConflict();
             // 完成multipart upload
-            await s3Client.send(new CompleteMultipartUploadCommand({
+            await guardProviderWrite(() => s3Client.send(new CompleteMultipartUploadCommand({
                 Bucket: bucketName,
                 Key: multipartInfo.key,
                 UploadId: multipartInfo.uploadId,
                 MultipartUpload: { Parts: parts }
-            }));
+            })), () => retainClaim(multipartInfo.key));
 
             // 计算总大小
             const totalSize = completedChunks.reduce((sum, chunk) => sum + chunk.uploadResult.size, 0);

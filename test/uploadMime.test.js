@@ -32,7 +32,7 @@ describe('upload MIME integration', () => {
             createResponse: (body, options) => new Response(body, options),
         });
         const request = new Request('https://img.example/upload/huggingface/getUploadUrl', {
-            method: 'POST', body: JSON.stringify({ fileSize: 3, fileName: 'photo.png', fileType: 'application/octet-stream', sha256: 'hash', fileSample: 'sample' }),
+            method: 'POST', body: JSON.stringify({ fileSize: 3, fileName: 'photo.png', fileType: 'application/octet-stream', sha256: 'a'.repeat(64), fileSample: 'sample' }),
         });
         const response = await route.onRequestPost({ request, env: {} });
         assert.equal(response.status, 200, await response.clone().text());

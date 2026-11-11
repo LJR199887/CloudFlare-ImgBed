@@ -1,3 +1,4 @@
+import { isSafeFileId } from '../../../../utils/fileId.js';
 /**
  * BatchRestoreChunkAPI - 分批恢复数据的 API 端点
  * 
@@ -74,12 +75,17 @@ export async function onRequestPost(context) {
     const errors = [];
 
     if (type === 'files') {
+      // Leave budget for authorization, credential checks, and releasing
+      // every claim even on D1 Free (50 queries/invocation).
+      if (env.img_d1?.prepare && Object.keys(data).length > 5) {
+        return jsonResponse({ success: false, error: 'D1 file restore batches are limited to 5 records', maxBatchSize: 5 }, 413);
+      }
       // 恢复文件数据 - 并行写入
       const filePromises = Object.entries(data).map(async ([key, fileData]) => {
         try {
           if (!fileData || typeof fileData !== 'object' || !fileData.metadata ||
               typeof fileData.metadata !== 'object' || Array.isArray(fileData.metadata) ||
-              key.startsWith('manage@') || key.startsWith('chunk_')) {
+              !isSafeFileId(key)) {
             throw new Error('Invalid file backup record');
           }
           if (needsChunkManifest(fileData.metadata)) parseChunkManifest(fileData.value, fileData.metadata);
@@ -97,7 +103,7 @@ export async function onRequestPost(context) {
                 metadata: fileData.metadata
               });
             }
-          });
+          }, { requireRelease: true });
           return { success: true };
         } catch (error) {
           return { success: false, key, error: error.message };
@@ -122,6 +128,7 @@ export async function onRequestPost(context) {
           const valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
           // 加回 manage@ 前缀
           const fullKey = key.startsWith('manage@') ? key : `manage@${key}`;
+          if (fullKey.startsWith('manage@hf-upload@')) throw new Error('Upload grants cannot be restored');
           if (fullKey === 'manage@sysConfig@security') parseSecuritySettings(valueToStore);
           await db.put(fullKey, valueToStore);
           return { success: true };

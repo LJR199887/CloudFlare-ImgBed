@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { Miniflare } from 'miniflare';
 
 const claims = await readFile(new URL('../functions/utils/fileMutation.js', import.meta.url), 'utf8');
+const fileIds = await readFile(new URL('../functions/utils/fileId.js', import.meta.url), 'utf8');
 const probe = `import { withFileMutation } from './claims.js';
 export default { async fetch(request, env) {
     try {
@@ -27,6 +28,7 @@ for (const [label, bindings] of [
         modules: [
             { type: 'ESModule', path: 'probe.js', contents: probe },
             { type: 'ESModule', path: 'claims.js', contents: claims },
+            { type: 'ESModule', path: 'fileId.js', contents: fileIds },
         ],
         ...bindings,
         serviceBindings: { LATCH: async () => { entered(); await resumed; return new Response(null); } },

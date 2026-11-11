@@ -68,7 +68,7 @@ export class WebDAVAPI {
 
             // 405 commonly means the collection already exists. Some servers return 200/204.
             if (![200, 201, 204, 405].includes(response.status)) {
-                throw new Error(`WebDAV MKCOL failed for ${currentPath}: ${response.status} ${response.statusText}`);
+                throw Object.assign(new Error(`WebDAV MKCOL failed for ${currentPath}: ${response.status} ${response.statusText}`), { status: response.status });
             }
         }
     }
@@ -84,9 +84,9 @@ export class WebDAVAPI {
             redirect: 'manual',
         });
 
-        if (!isSuccessStatus(response.status)) {
+        if (![200, 201, 204].includes(response.status)) {
             const detail = await safeReadResponseText(response);
-            throw new Error(`WebDAV PUT failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            throw Object.assign(new Error(`WebDAV PUT failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`), { status: response.status });
         }
 
         return response;

@@ -1,3 +1,4 @@
+import { issueHuggingFaceGrant } from '../../utils/huggingFaceGrant.js';
 /**
  * HuggingFace 大文件直传 API
  *
@@ -40,7 +41,8 @@ export async function onRequestPost(context) {
         const body = await request.json();
         const { fileSize, fileName, fileType, sha256, fileSample, channelName, uploadNameType, uploadFolder } = body;
 
-        if (!fileSize || !fileName || !sha256 || !fileSample) {
+        if (!Number.isSafeInteger(fileSize) || fileSize <= 0 || typeof fileName !== 'string' || !fileName ||
+            typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256) || typeof fileSample !== 'string' || !fileSample) {
             return createResponse(JSON.stringify({
                 error: 'Missing required fields: fileSize, fileName, sha256, fileSample'
             }), {
@@ -100,18 +102,24 @@ export async function onRequestPost(context) {
         const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
         const uploadInfo = await huggingfaceAPI.getLfsUploadInfo(fileSize, filePath, sha256, fileSample);
 
+        if (uploadInfo.needsLfs) {
+            await issueHuggingFaceGrant(env, {
+                fullId, filePath, sha256, fileSize, fileName, fileType: resolveFileType(fileName, fileType),
+                channelName: hfChannel.name, repo: hfChannel.repo,
+            });
+        }
         // 返回上传信息
         return createResponse(JSON.stringify({
+            ...uploadInfo,
             success: true,
             fullId,
             filePath,
             channelName: hfChannel.name,
             repo: hfChannel.repo,
-            isPrivate: hfChannel.isPrivate || false,
-            ...uploadInfo
+            isPrivate: hfChannel.isPrivate || false
         }), {
             status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
         });
 
     } catch (error) {

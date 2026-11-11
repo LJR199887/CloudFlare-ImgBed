@@ -1,3 +1,4 @@
+import { getHuggingFaceGrant } from '../../utils/huggingFaceGrant.js';
 import { withFileMutation, FileMutationConflict } from '../../utils/fileMutation.js';
 /**
  * HuggingFace 大文件提交 API
@@ -8,8 +9,7 @@ import { withFileMutation, FileMutationConflict } from '../../utils/fileMutation
 import { HuggingFaceAPI } from '../../utils/storage/huggingfaceAPI.js';
 import { fetchUploadConfig } from '../../utils/sysConfig.js';
 import { getDatabase } from '../../utils/databaseAdapter.js';
-import { resolveFileType } from '../../utils/mimeTypes.js';
-import { moderateContent, endUpload, getUploadIp, getIPAddress, sanitizeUploadFolder, createResponse } from '../uploadTools.js';
+import { moderateContent, endUpload, getUploadIp, getIPAddress, isBlockedUploadIp, createResponse } from '../uploadTools.js';
 import { userAuthCheck, UnauthorizedResponse } from '../../utils/auth/userAuth.js';
 
 export async function onRequestPost(context) {
@@ -23,91 +23,48 @@ export async function onRequestPost(context) {
             return UnauthorizedResponse('Unauthorized');
         }
 
+        const uploadIp = getUploadIp(request) || '';
+        if (await isBlockedUploadIp(env, uploadIp)) return createResponse('IP blocked', { status: 403 });
         const body = await request.json();
-        const { fullId, filePath, sha256, fileSize, fileName, fileType, channelName, multipartParts } = body;
-
-        if (!fullId || !filePath || !sha256 || !fileSize) {
-            return createResponse(JSON.stringify({
-                error: 'Missing required fields: fullId, filePath, sha256, fileSize'
-            }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json' }
-            });
+        if (typeof body?.fullId !== 'string' || !body.fullId || typeof body.filePath !== 'string') {
+            return createResponse('Missing upload ID or path', { status: 400 });
         }
 
-        // 路径安全处理：使用统一的路径安全函数
-        const sanitizedFullId = sanitizeUploadFolder(fullId);
-        if (sanitizedFullId !== fullId) {
-            return createResponse(JSON.stringify({
-                error: 'Invalid fullId: contains illegal path characters'
-            }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-
-        return await withFileMutation(env, [fullId], async env => {
+        return await withFileMutation(env, [body.fullId], async env => {
+            const session = await getHuggingFaceGrant(env, body);
+            if (!session) return createResponse('Upload grant is invalid, expired or already used; start a new upload', { status: 409 });
+            const { fullId, filePath, sha256, fileSize, fileName, fileType, channelName, repo } = session.grant;
             const db = getDatabase(env);
             if (await db.get(fullId) != null) throw new FileMutationConflict();
-            // 获取 HuggingFace 配置
             const uploadConfig = await fetchUploadConfig(env);
-            const hfSettings = uploadConfig.huggingface;
-
-            if (!hfSettings || !hfSettings.channels || hfSettings.channels.length === 0) {
-                return createResponse(JSON.stringify({ error: 'No HuggingFace channel configured' }), {
-                    status: 400,
-                    headers: { 'Content-Type': 'application/json' }
+            const hfChannel = uploadConfig.huggingface?.channels?.find(c => c.name === channelName && c.repo === repo);
+            if (!hfChannel?.token) return createResponse('The granted HuggingFace channel changed; start a new upload', { status: 409 });
+            const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, repo, hfChannel.isPrivate || false);
+            // Pure KV may expose a recently consumed grant at another edge.
+            // Never use it to attach a second record to a published path.
+            if (session.eventual) {
+                const existing = await fetch(huggingfaceAPI.getFileURL(filePath), {
+                    method: 'HEAD', redirect: 'manual', headers: { Authorization: `Bearer ${hfChannel.token}`, 'Cache-Control': 'no-cache' },
                 });
+                if (existing.status !== 404) return createResponse('Could not verify the granted path is unused', { status: 409 });
             }
-
-            // 选择渠道
-            let hfChannel;
-            if (channelName) {
-                hfChannel = hfSettings.channels.find(c => c.name === channelName);
-            }
-            if (!hfChannel) {
-                hfChannel = hfSettings.channels[0];
-            }
-
-            if (!hfChannel || !hfChannel.token || !hfChannel.repo) {
-                return createResponse(JSON.stringify({ error: 'HuggingFace channel not properly configured' }), {
-                    status: 400,
-                    headers: { 'Content-Type': 'application/json' }
-                });
-            }
-
-            const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
-
-            // 如果有 multipart parts，需要先完成 multipart 上传
-            if (multipartParts && multipartParts.length > 0) {
-                console.log('Completing multipart upload...');
-            }
-
-            // 提交 LFS 文件引用
-            console.log('Committing LFS file...');
-            const commitResult = await huggingfaceAPI.commitLfsFile(
-                filePath,
-                sha256,
-                fileSize,
-                `Upload ${fileName || fullId}`
-            );
-            console.log('Commit result:', JSON.stringify(commitResult));
+            if (!await session.consume()) throw new FileMutationConflict('Upload grant expired or already used');
+            await huggingfaceAPI.commitLfsFile(filePath, sha256, fileSize, `Upload ${fileName}`);
 
             // 构建文件 URL
-            const fileUrl = `https://huggingface.co/datasets/${hfChannel.repo}/resolve/main/${filePath}`;
+            const fileUrl = huggingfaceAPI.getFileURL(filePath);
 
             // 从 fullId 中提取目录信息
             const dirParts = fullId.split('/').slice(0, -1).join('/');
             const normalizedDirectory = dirParts === '' ? '' : dirParts + '/';
 
             // 获取上传IP和地址
-            const uploadIp = getUploadIp(request) || '';
             const uploadAddress = await getIPAddress(uploadIp);
 
             // 构建 metadata
             const metadata = {
                 FileName: fileName || fullId,
-                FileType: resolveFileType(fileName || fullId, fileType),
+                FileType: fileType,
                 Channel: "HuggingFace",
                 ChannelName: hfChannel.name || "HuggingFace_env",
                 FileSize: (fileSize / 1024 / 1024).toFixed(2),

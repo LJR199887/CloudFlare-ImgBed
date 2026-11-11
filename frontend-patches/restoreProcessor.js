@@ -109,7 +109,7 @@ class RestoreProcessor {
         total: totalItems
       });
 
-      const fileChunks = this.splitIntoChunks(fileEntries, this.chunkSize);
+      const fileChunks = this.splitIntoChunks(fileEntries, Math.min(this.chunkSize, 5));
 
       for (let i = 0; i < fileChunks.length; i++) {
         if (this.aborted) {

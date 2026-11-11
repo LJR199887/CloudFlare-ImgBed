@@ -1,3 +1,4 @@
+import { isSafeFileId } from '../utils/fileId.js';
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { fetchSecurityConfig } from "../utils/sysConfig";
 import { TelegramAPI } from "../utils/storage/telegramAPI";
@@ -39,6 +40,8 @@ export async function onRequest(context) {  // Contents of context object
     } catch (e) {
         return new Response('Error: Decode Image ID Failed', { status: 400 });
     }
+
+    if (!isSafeFileId(fileId)) return new Response('Invalid file ID', { status: 400 });
 
     // 读取安全配置，解析必要参数
     const securityConfig = await fetchSecurityConfig(env);

@@ -12,7 +12,7 @@ import { DiscordAPI } from "../utils/storage/discordAPI";
 import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
+import { guardProviderWrite, withFileMutation, FileMutationConflict } from '../utils/fileMutation.js';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { resolveFileType } from '../utils/mimeTypes.js';
 import { getWebDAVAccountId, hasWebDAVPassword } from '../utils/metadata/webdavIdentity.js';
@@ -196,9 +196,14 @@ async function processFileUpload(context, formdata = null) {
     const fullId = await buildUniqueFileId(context, fileName, fileType);
 
     try {
-        return await withFileMutation(context.env, [fullId], async env => {
+        return await withFileMutation(context.env, [fullId], async (env, retainClaim) => {
             if (await getDatabase(env).get(fullId) != null) throw new FileMutationConflict();
-            return await storeUpload({ ...context, env }, uploadChannel, fullId, metadata, fileExt, fileName, fileType);
+            const uploadContext = { ...context, env };
+            uploadContext.retainUploadClaim = () => {
+                uploadContext.uploadUncertain = true;
+                retainClaim(fullId);
+            };
+            return await storeUpload(uploadContext, uploadChannel, fullId, metadata, fileExt, fileName, fileType);
         });
     } catch (error) {
         if (error.status === 409) return createResponse(error.message, { status: 409 });
@@ -226,7 +231,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     if (uploadChannel === 'CloudflareR2') {
         // -------------CloudFlare R2 渠道---------------
         const res = await uploadFileToCloudflareR2(context, fullId, metadata, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -234,7 +239,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     } else if (uploadChannel === 'S3') {
         // ---------------------S3 渠道------------------
         const res = await uploadFileToS3(context, fullId, metadata, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -242,7 +247,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     } else if (uploadChannel === 'Discord') {
         // ---------------------Discord 渠道------------------
         const res = await uploadFileToDiscord(context, fullId, metadata, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -250,7 +255,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     } else if (uploadChannel === 'HuggingFace') {
         // ---------------------HuggingFace 渠道------------------
         const res = await uploadFileToHuggingFace(context, fullId, metadata, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -258,7 +263,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     } else if (uploadChannel === 'WebDAV') {
         // ---------------------WebDAV 渠道------------------
         const res = await uploadFileToWebDAV(context, fullId, metadata, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -270,7 +275,7 @@ async function storeUpload(context, uploadChannel, fullId, metadata, fileExt, fi
     } else {
         // ----------------Telegram New 渠道-------------------
         const res = await uploadFileToTelegram(context, fullId, metadata, fileExt, fileName, fileType, returnLink);
-        if (res.status === 200 || !autoRetry) {
+        if (res.status === 200 || !autoRetry || context.uploadUncertain) {
             return res;
         } else {
             err = await res.text();
@@ -408,7 +413,7 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         };
 
         // 执行上传
-        await s3Client.send(new PutObjectCommand(putObjectParams));
+        await guardProviderWrite(() => s3Client.send(new PutObjectCommand(putObjectParams)), () => context.retainUploadClaim?.());
 
         // 更新 metadata
         metadata.Channel = "S3";
@@ -891,7 +896,7 @@ async function uploadFileToWebDAV(context, fullId, metadata, returnLink) {
 
     try {
         const webdavAPI = new WebDAVAPI(webdavChannel);
-        await webdavAPI.putFile(fullId, file, metadata.FileType);
+        await guardProviderWrite(() => webdavAPI.putFile(fullId, file, metadata.FileType), context.retainUploadClaim);
 
         metadata.Channel = "WebDAV";
         metadata.ChannelName = webdavChannel.name || "WebDAV_env";
@@ -970,7 +975,7 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
     }
 
     // 原渠道重试成功，直接返回
-    if (retryRes && retryRes.status === 200) {
+    if (retryRes && (retryRes.status === 200 || context.uploadUncertain)) {
         return retryRes;
     } else if (retryRes) {
         errMessages[uploadChannel + '_retry'] = 'Error: ' + uploadChannel + ' retry - ' + await retryRes.text();
@@ -994,7 +999,7 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
                 res = await uploadFileToDiscord(context, fullId, metadata, returnLink);
             }
 
-            if (res && res.status === 200) {
+            if (res && (res.status === 200 || context.uploadUncertain)) {
                 return res;
             } else if (res) {
                 errMessages[channelList[i]] = 'Error: ' + channelList[i] + await res.text();

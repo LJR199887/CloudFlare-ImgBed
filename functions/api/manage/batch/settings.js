@@ -76,7 +76,7 @@ function isIndexRelatedKey(key) {
   }
 
   // 匹配会话数据键 (manage@session@*)
-  if (key.startsWith('manage@session@')) {
+  if (key.startsWith('manage@session@') || key.startsWith('manage@hf-upload@')) {
     return true;
   }
   

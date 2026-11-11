@@ -118,7 +118,7 @@ export async function onRequest(context) {
             success: false,
             message: error.message || 'Internal server error.',
         }), {
-            status: error.status === 409 ? 409 : 500,
+            status: [409, 413].includes(error.status) ? error.status : 500,
             headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
     }

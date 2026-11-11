@@ -1,7 +1,7 @@
 import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { moveFileInIndex } from "../../../utils/indexManager.js";
-import { deletionMayStillApply, withFileMutation, FileMutationConflict } from '../../../utils/fileMutation.js';
+import { deletionMayStillApply, guardProviderWrite, withFileMutation, FileMutationConflict } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
@@ -144,10 +144,12 @@ export async function onRequest(context) {
 
             // S3 渠道的图片，需要移动 S3 中对应的图片
             if (metadata?.Channel === 'S3') {
-                const { success, newKey, error, cleanup } = await copyS3File(fileData, newFileId);
+                const { success, newKey, error, cleanup } = await copyS3File(fileData, newFileId, () => retainClaim(newFileId));
                 if (success) {
                     deleteSource = cleanup;
                     // 更新 metadata
+                    // The old CDN URL could serve a different file once the old key is reused.
+                    if (metadata.S3FileKey !== newFileId) delete metadata.S3CdnFileUrl;
                     metadata.S3FileKey = newFileId;
 
                     const s3ServerDomain = metadata.S3Endpoint.replace(/https?:\/\//, "");
@@ -248,7 +250,7 @@ export async function onRequest(context) {
 }
 
 // 移动 S3 渠道的图片
-async function copyS3File(img, newFileId) {
+async function copyS3File(img, newFileId, retainDestination) {
     const s3Client = new S3Client({
         region: img.metadata?.S3Region || "auto",
         endpoint: img.metadata?.S3Endpoint,
@@ -266,11 +268,11 @@ async function copyS3File(img, newFileId) {
     try {
         if (oldKey === newKey) return { success: true, newKey, cleanup: async () => {} };
         // 复制文件到新位置
-        await s3Client.send(new CopyObjectCommand({
+        await guardProviderWrite(() => s3Client.send(new CopyObjectCommand({
             Bucket: bucketName,
             CopySource: `/${bucketName}/${oldKey.split('/').map(encodeURIComponent).join('/')}`,
             Key: newKey,
-        }));
+        })), retainDestination);
 
         return { success: true, newKey, cleanup: () => s3Client.send(new DeleteObjectCommand({
             Bucket: bucketName, Key: oldKey,

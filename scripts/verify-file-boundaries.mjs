@@ -11,19 +11,29 @@ const [artifact, browser] = process.argv.slice(2);
 if (!artifact) throw new Error('Usage: node scripts/verify-file-boundaries.mjs <compiled index.js> [Edge/Chromium executable]');
 let page = '';
 const outgoing = [];
+const hfCommits = [];
 const mf = new Miniflare({
     script: await readFile(artifact, 'utf8'), modules: true, compatibilityDate: '2024-12-01',
     host: '127.0.0.1', cf: false, kvNamespaces: ['img_url'], r2Buckets: ['img_r2'],
     serviceBindings: { ASSETS: () => new Response(page, { headers: { 'Content-Type': 'text/html' } }) },
-    outboundService: req => {
+    outboundService: async req => {
         if (new URL(req.url).hostname === 'api.telegram.org') {
             outgoing.push({ url: new URL(req.url), headers: new Headers(req.headers) });
             if (req.url.includes('/getFile?')) return Response.json({ ok:true, result:{ file_path:'test.png' } });
             return new Response('x', {headers:{'Set-Cookie':'injected=1', Refresh:'0; url=/secret'}});
         }
+        if (new URL(req.url).hostname === 'huggingface.co') {
+            const path = new URL(req.url).pathname;
+            if (path.endsWith('/preupload/main')) return Response.json({ files: [{ uploadMode: 'lfs' }] });
+            if (path.endsWith('/objects/batch')) return Response.json({ objects: [{}] });
+            if (path.endsWith('/commit/main')) {
+                hfCommits.push(JSON.parse((await req.text()).split('\n')[1]).value);
+                return Response.json({ commitOid: 'fixture' });
+            }
+        }
         return Response.json({});
     },
-    bindings:{TG_BOT_TOKEN:'123:fixture',TG_CHAT_ID:'chat'},
+    bindings:{TG_BOT_TOKEN:'123:fixture',TG_CHAT_ID:'chat',HF_TOKEN:'fixture',HF_REPO:'owner/repo',HF_PRIVATE:'true'},
 });
 try {
     const origin = await mf.ready;
@@ -71,6 +81,7 @@ try {
         apiTokens: { tokens: {
             read: { token: 'read-fixture', permissions: ['list'] },
             manage: { token: 'manage-fixture', permissions: ['manage'] },
+            upload: { token: 'upload-fixture', permissions: ['upload'] },
         } },
     }));
     await kv.put('list/probe.png', '', { metadata: { Channel: 'CloudflareR2', FileName: 'original' } });
@@ -116,6 +127,40 @@ try {
     assert.equal(await (await req('/file/contended.txt')).text(), won ? 'first' : 'second');
     assert.equal(await (await req(won ? second : first)).text(), won ? 'second' : 'first');
     console.log('PASS: compiled Worker honors R2 claims and preserves the losing source on collision');
+
+    const originalMetadata = { Channel: 'CloudflareR2', FileName: '', FileType: 'text/plain' };
+    await kv.put('near-limit.txt', '', { metadata: originalMetadata });
+    const changeName = FileName => req('/api/manage/metadata/near-limit.txt', { method:'PATCH',headers:admin,body:JSON.stringify({FileName}) });
+    const rejectedName = 'x'.repeat(1010 - Buffer.byteLength(JSON.stringify(originalMetadata)));
+    assert.equal((await changeName(rejectedName)).status,413);
+    assert.equal((await changeName('short.txt')).status,200);
+    assert.equal((await kv.getWithMetadata('near-limit.txt')).metadata.FileName,'short.txt');
+    console.log('PASS: rejected KV metadata does not poison the file generation');
+
+    const hfPost = (route, body) => req(`/upload/huggingface/${route}`, {
+        method:'POST',headers:{Authorization:'Bearer upload-fixture'},body:JSON.stringify(body),
+    });
+    const input = {fileName:'new.bin',fileSize:3,sha256:'a'.repeat(64),fileSample:'YWJj',uploadNameType:'origin'};
+    assert.equal((await hfPost('commitUpload',{...input,fullId:'fresh.bin',filePath:'published.bin'})).status,409);
+    const grantResponse = await hfPost('getUploadUrl', input);
+    assert.equal(grantResponse.status,200,await grantResponse.clone().text());
+    const {fullId,filePath,channelName} = await grantResponse.json();
+    const commitBody = {...input,fullId,filePath,channelName};
+    for (const change of [{fullId:'different.bin'},{sha256:'b'.repeat(64)},{fileSize:4},{filePath:'published.bin'},{channelName:'other'}]) {
+        assert.equal((await hfPost('commitUpload',{...commitBody,...change})).status,409);
+    }
+    assert.equal(hfCommits.length,0);
+    const committed=await hfPost('commitUpload',commitBody);
+    assert.equal(committed.status,200,await committed.clone().text());
+    assert.equal(hfCommits.length,1);
+    assert.equal(hfCommits[0].path,filePath);
+    assert.equal((await req(`/api/manage/rename/${fullId}`,{
+        method:'POST',headers:admin,body:JSON.stringify({newFileId:'renamed-hf.bin'}),
+    })).status,200);
+    assert.equal((await hfPost('commitUpload',commitBody)).status,409);
+    assert.equal(hfCommits.length,1);
+    assert.equal((await req('/file/..%2Foutside.txt')).status,400);
+    console.log('PASS: direct upload grants reject overwrite, mismatched parameters and replay after rename');
 
     if (browser) {
         // If either an HTML document or an uploaded JS subresource executes,
