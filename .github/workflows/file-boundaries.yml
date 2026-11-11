@@ -1,0 +1,28 @@
+name: File and credential regression checks
+on:
+  pull_request:
+  push:
+    branches: [feature/metadata-security-mime-tests]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Exercise the built Pages Worker (no production bindings)
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npx --no-install wrangler pages functions build functions --outdir "$RUNNER_TEMP/imgbed-worker"
+          node scripts/verify-file-boundaries.mjs "$RUNNER_TEMP/imgbed-worker/index.js"
+          node scripts/verify-mutation-coordination.mjs

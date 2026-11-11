@@ -7,6 +7,10 @@
  */
 
 import { getDatabase, checkDatabaseConfig } from '../../../../utils/databaseAdapter.js';
+import { stripSensitiveMetadata } from '../../../../utils/metadata/metadataSecurity.js';
+import { readKVMutationStates, compactKVMutationStates,
+  matchesKVMutationStates } from '../../../../utils/kvIndexMutationState.js';
+import { newKVIndexChunkPrefix, kvIndexChunkKey, pruneKVIndexChunks } from '../../../../utils/kvIndexChunks.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -17,7 +21,6 @@ const corsHeaders = {
 };
 
 // 索引存储键
-const INDEX_KEY = 'manage@index';
 const INDEX_META_KEY = 'manage@index@meta';
 // D1 单字段限制 2MB，KV 限制 25MB，根据数据库类型动态设置
 const INDEX_CHUNK_SIZE_D1 = 500; // D1 数据库分块大小
@@ -120,15 +123,15 @@ function validateRequestBody(body) {
 }
 
 /**
- * 读取所有分块数据
+ * 验证 KV 暂存分块；索引本身始终从当前数据库记录构建。
  * @param {Object} db - 数据库实例
  * @param {string} sessionId - 会话 ID
  * @param {number} totalChunks - 总分块数
- * @returns {Promise<{success: boolean, chunks?: Array, error?: string, missingChunks?: Array}>}
+ * @returns {Promise<{success: boolean, error?: string, missingChunks?: Array}>}
  */
 async function readAllChunks(db, sessionId, totalChunks) {
-  const chunks = [];
   const missingChunks = [];
+  const stagedIds = new Set();
 
   // 读取所有分块 (0 到 totalChunks-1)
   for (let chunkId = 0; chunkId < totalChunks; chunkId++) {
@@ -149,12 +152,14 @@ async function readAllChunks(db, sessionId, totalChunks) {
         missingChunks.push(chunkId);
         continue;
       }
+      for (const file of chunkData.data) {
+        if (typeof file?.id !== 'string' || !file.id) {
+          missingChunks.push(chunkId);
+          break;
+        }
+        stagedIds.add(file.id);
+      }
 
-      chunks.push({
-        chunkId: parseInt(chunkData.chunkId, 10),
-        data: chunkData.data,
-        recordCount: chunkData.recordCount || chunkData.data.length,
-      });
     } catch (error) {
       console.error(`Error reading chunk ${chunkId}:`, error);
       missingChunks.push(chunkId);
@@ -169,25 +174,46 @@ async function readAllChunks(db, sessionId, totalChunks) {
     };
   }
 
-  return { success: true, chunks };
+  return { success: true, stagedIds };
 }
 
-/**
- * 组装分块为完整索引
- * @param {Array} chunks - 分块数组
- * @returns {Array} 完整的文件记录数组
- */
-function assembleChunks(chunks) {
-  // 按 chunkId 排序确保顺序正确
-  chunks.sort((a, b) => a.chunkId - b.chunkId);
+async function readCanonicalFiles(db) {
+  const files = [];
+  let cursor = null;
+  // D1 Free permits 50 binding calls per invocation. A larger D1 page keeps
+  // ordinary six-figure galleries below that budget; KV list caps at 1000.
+  const limit = typeof db.listPendingIndexOperations === 'function' ? 4000 : 1000;
+  do {
+    const page = await db.list({ limit, cursor });
+    if (!Array.isArray(page?.keys)) throw new Error('Database list failed during index rebuild');
+    if (page.list_complete === false && !page.cursor) throw new Error('Database list returned an incomplete page without a cursor');
+    for (const item of page.keys) {
+      if (item.name.startsWith('manage@') || item.name.startsWith('chunk_') || !item.metadata?.TimeStamp) continue;
+      files.push({ id: item.name, metadata: item.metadata });
+    }
+    if (page.cursor === cursor && cursor !== null) throw new Error('Database cursor did not advance');
+    cursor = page.cursor || null;
+  } while (cursor);
+  files.sort((a, b) => (b.metadata.TimeStamp || 0) - (a.metadata.TimeStamp || 0)
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return files;
+}
 
-  // 合并所有分块的数据
-  const allFiles = [];
-  for (const chunk of chunks) {
-    allFiles.push(...chunk.data);
+async function verifyKVFiles(db, files) {
+  // KV list() and getWithMetadata() may observe different revisions. Never
+  // acknowledge a rebuild based on a known-inconsistent snapshot. The bulk
+  // API keeps this bounded to one read per 100 file IDs in real Workers KV.
+  for (let i = 0; i < files.length; i += 100) {
+    const page = files.slice(i, i + 100);
+    const current = new Map((await db.getIndexFiles(page.map(file => file.id)))
+      .map(file => [file.id, file.metadata]));
+    if (page.some(file => !current.has(file.id)
+      || JSON.stringify(current.get(file.id)) !== JSON.stringify(file.metadata))) {
+      const error = new Error('KV file listing changed or is stale; retry the rebuild after KV propagation');
+      error.status = 409;
+      throw error;
+    }
   }
-
-  return allFiles;
 }
 
 /**
@@ -197,8 +223,9 @@ function assembleChunks(chunks) {
  * @param {Object} env - 环境变量
  * @returns {Promise<{success: boolean, metadata?: Object, error?: string}>}
  */
-async function saveIndex(db, files, env) {
+async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOperationIds = [], mutationStates = [], waitUntil, expectedKV) {
   try {
+    files = files.map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) }));
     const chunkSize = getIndexChunkSize(env);
     const chunks = [];
     
@@ -236,19 +263,33 @@ async function saveIndex(db, files, env) {
       totalSizeMB: Math.round(totalSizeMB * 100) / 100,
       channelStats,
       lastOperationId: null, // 重建后清除操作 ID
+      ...(expected === undefined ? { appliedOperationIds: appliedOperationIds.slice(-10000), mutationStates } : {}),
       chunkCount: chunks.length,
       chunkSize: chunkSize,
     };
 
-    await db.put(INDEX_META_KEY, JSON.stringify(metadata));
+    if (expected !== undefined) {
+      if (!await db.writeIndexSnapshot(metadata, chunks, expected, [], rebuildChunks)) {
+        return { success: false, conflict: true, error: 'Index changed while the rebuild was being finalized; retry' };
+      }
+      return { success: true, metadata };
+    }
 
-    // 保存各个分块
+    metadata.chunkPrefix = newKVIndexChunkPrefix();
+    // Publish the manifest only after all immutable chunks exist.
     const savePromises = chunks.map((chunk, chunkId) => {
-      const chunkKey = `${INDEX_KEY}_${chunkId}`;
+      const chunkKey = kvIndexChunkKey(metadata, chunkId);
       return db.put(chunkKey, JSON.stringify(chunk));
     });
 
     await Promise.all(savePromises);
+    if (await db.get(INDEX_META_KEY) !== expectedKV) {
+      return { success: false, conflict: true, error: 'KV index changed during publication; retry' };
+    }
+    await db.put(INDEX_META_KEY, JSON.stringify(metadata));
+    const pruning = pruneKVIndexChunks(db, metadata.chunkPrefix);
+    if (typeof waitUntil === 'function') waitUntil(pruning);
+    else await pruning;
 
     console.log(`Saved index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
 
@@ -283,42 +324,6 @@ async function cleanupChunks(db, sessionId, totalChunks) {
 }
 
 /**
- * 清理旧的索引分块（如果新索引分块数量少于旧的）
- * @param {Object} db - 数据库实例
- * @param {number} newChunkCount - 新索引的分块数量
- * @returns {Promise<void>}
- */
-async function cleanupOldIndexChunks(db, newChunkCount) {
-  try {
-    // 读取旧的元数据获取旧的分块数量
-    const oldMetaStr = await db.get(INDEX_META_KEY);
-    if (!oldMetaStr) {
-      return;
-    }
-
-    const oldMeta = JSON.parse(oldMetaStr);
-    const oldChunkCount = oldMeta.chunkCount || 0;
-
-    // 如果新的分块数量少于旧的，删除多余的分块
-    if (newChunkCount < oldChunkCount) {
-      const deletePromises = [];
-      for (let i = newChunkCount; i < oldChunkCount; i++) {
-        const chunkKey = `${INDEX_KEY}_${i}`;
-        deletePromises.push(
-          db.delete(chunkKey).catch(error => {
-            console.warn(`Failed to delete old index chunk ${chunkKey}:`, error);
-          })
-        );
-      }
-      await Promise.all(deletePromises);
-      console.log(`Cleaned up ${oldChunkCount - newChunkCount} old index chunks`);
-    }
-  } catch (error) {
-    console.warn('Error cleaning up old index chunks:', error);
-  }
-}
-
-/**
  * 处理 POST 请求 - 完成索引重建
  * 
  * @param {Object} context - Cloudflare Workers 上下文
@@ -348,52 +353,77 @@ export async function onRequestPost(context) {
 
     // 4. 获取数据库实例
     const db = getDatabase(env);
-
-    // 5. 处理空索引的情况
-    if (totalChunks === 0 || totalFiles === 0) {
-      // 保存空索引
-      const saveResult = await saveIndex(db, [], env);
-      if (!saveResult.success) {
-        return errorResponse('Failed to save empty index', 500, saveResult.error);
+    const atomic = typeof db.writeIndexSnapshot === 'function' && typeof db.db.batch === 'function';
+    const expected = atomic ? await db.get(INDEX_META_KEY) : undefined;
+    const oldMeta = !atomic ? await db.get(INDEX_META_KEY) : null;
+    let appliedOperationIds = [];
+    let mutationStates = [];
+    if (oldMeta) {
+      let previous = null;
+      try {
+        previous = JSON.parse(oldMeta);
+      } catch (_) { /* Rebuilds also repair corrupt metadata. */ }
+      if (previous) {
+        const ids = previous.appliedOperationIds;
+        if (Array.isArray(ids)) appliedOperationIds = ids.filter(id => typeof id === 'string').slice(-10000);
+        mutationStates = compactKVMutationStates(readKVMutationStates(previous));
       }
-
-      // 清理旧的索引分块
-      await cleanupOldIndexChunks(db, 0);
-
-      return jsonResponse({
-        success: true,
-        indexedCount: 0,
-        lastUpdated: saveResult.metadata.lastUpdated,
-      });
     }
 
-    // 读取所有分块
+    if (atomic) {
+      // Browser staging may be older than a deletion whose queue entry was
+      // already acknowledged. Build from the authoritative D1 file table,
+      // not from that stale snapshot. The CAS protects the scan against a
+      // concurrent index merge; later file mutations remain queued.
+      if (typeof db.listRebuildChunkIds !== 'function') throw new Error('D1 rebuild staging API unavailable');
+      const staged = new Set(await db.listRebuildChunkIds(sessionId));
+      const missing = Array.from({ length: totalChunks }, (_, i) => i)
+        .filter(i => !staged.has(`chunk_${sessionId}_${i}`));
+      if (missing.length) return errorResponse('Failed to read chunks', 400, `Missing chunks: ${missing.join(', ')}`);
+      const files = await readCanonicalFiles(db);
+      const stagedKeys = Array.from({ length: totalChunks }, (_, i) => `chunk_${sessionId}_${i}`);
+      const saved = await saveIndex(db, files, env, expected, stagedKeys);
+      if (!saved.success) return errorResponse('Failed to save index', saved.conflict ? 409 : 500, saved.error);
+      // The snapshot and temporary-row cleanup commit in one D1 transaction.
+      return jsonResponse({ success: true, indexedCount: files.length, lastUpdated: saved.metadata.lastUpdated });
+    }
+
+    // KV also must not republish a browser snapshot that predates a delete.
+    // Its staging cannot provide an atomic snapshot, so validate presence and
+    // reconstruct from the live records instead. Pending operations remain.
     const chunksResult = await readAllChunks(db, sessionId, totalChunks);
-    if (!chunksResult.success) {
-      return errorResponse('Failed to read chunks', 400, chunksResult.error);
+    if (!chunksResult.success) return errorResponse('Failed to read chunks', 400, chunksResult.error);
+    const allFiles = await readCanonicalFiles(db);
+    await verifyKVFiles(db, allFiles);
+    if (!matchesKVMutationStates(allFiles, readKVMutationStates({ mutationStates }))) {
+      return errorResponse('KV listing conflicts with recent index mutations; retry after propagation', 409);
     }
-
-    // 7. 组装分块为完整索引
-    const allFiles = assembleChunks(chunksResult.chunks);
+    // If the client scan and server scan disagree, the KV view is unstable.
+    // Do not publish either snapshot or consume the staging session.
+    const currentIds = new Set(allFiles.map(file => file.id));
+    if (currentIds.size !== chunksResult.stagedIds.size
+      || [...currentIds].some(id => !chunksResult.stagedIds.has(id))) {
+      return errorResponse('KV files changed while rebuilding; retry after KV propagation', 409);
+    }
 
     // 8. 验证文件数量
     if (allFiles.length !== totalFiles) {
-      console.warn(`File count mismatch: expected ${totalFiles}, got ${allFiles.length}`);
-      // 不作为错误处理，继续保存实际获取的文件数量
+      return errorResponse('KV file count changed while rebuilding; retry', 409,
+        `Expected ${totalFiles}, found ${allFiles.length}`);
+    }
+    if (await db.get(INDEX_META_KEY) !== oldMeta) {
+      return errorResponse('KV index changed while rebuilding; retry', 409);
     }
 
-    // 9. 清理旧的索引分块（在保存新索引之前）
-    const chunkSize = getIndexChunkSize(env);
-    const newChunkCount = Math.ceil(allFiles.length / chunkSize);
-    await cleanupOldIndexChunks(db, newChunkCount);
-
-    // 10. 保存新索引
-    const saveResult = await saveIndex(db, allFiles, env);
+    // 保存新索引
+    const saveResult = await saveIndex(db, allFiles, env, expected, [], appliedOperationIds, mutationStates, context.waitUntil, oldMeta);
     if (!saveResult.success) {
-      return errorResponse('Failed to save index', 500, saveResult.error);
+      return errorResponse('Failed to save index', saveResult.conflict ? 409 : 500, saveResult.error);
     }
+    // KV has no conditional delete: deleting an old chunk here could erase a
+    // newer concurrent index. Extra keys above chunkCount are inert.
 
-    // 11. 清理临时分块数据
+    // 清理临时分块数据
     // 使用 waitUntil 异步清理，不阻塞响应
     if (context.waitUntil) {
       context.waitUntil(cleanupChunks(db, sessionId, totalChunks));
@@ -401,7 +431,7 @@ export async function onRequestPost(context) {
       await cleanupChunks(db, sessionId, totalChunks);
     }
 
-    // 12. 返回成功响应
+    // 返回成功响应
     return jsonResponse({
       success: true,
       indexedCount: allFiles.length,
@@ -410,6 +440,7 @@ export async function onRequestPost(context) {
 
   } catch (error) {
     console.error('Error in BatchIndexFinalizeAPI:', error);
+    if (error.status === 409) return errorResponse(error.message, 409);
     return errorResponse(`Server error: ${error.message}`, 500);
   }
 }

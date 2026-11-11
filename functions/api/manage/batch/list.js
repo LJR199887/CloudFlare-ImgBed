@@ -6,6 +6,10 @@
  */
 
 import { getDatabase } from '../../../utils/databaseAdapter.js';
+import { prepareMetadataForBackup } from '../../../utils/metadata/writeSafety.js';
+import { prepareMetadataForStorage } from '../../../utils/metadata/webdavIdentity.js';
+import { loadChannelConfig } from '../../../utils/metadata/channelConfig.js';
+import { needsChunkManifest, parseChunkManifest } from '../../../utils/chunkManifest.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -39,22 +43,6 @@ function jsonResponse(data, status = 200) {
  */
 function errorResponse(message, status = 400) {
   return jsonResponse({ success: false, error: message }, status);
-}
-
-/**
- * 检查文件是否为需要读取 value 的分块文件
- * 仅 TelegramNew 和 Discord 渠道的分块文件需要读取 value
- * 
- * @param {Object} metadata - 文件元数据
- * @returns {boolean}
- */
-function isChunkedFileNeedingValue(metadata) {
-  if (!metadata || !metadata.IsChunked) {
-    return false;
-  }
-  
-  const channel = metadata.Channel;
-  return channel === 'TelegramNew' || channel === 'Discord';
 }
 
 /**
@@ -102,41 +90,46 @@ export async function onRequestGet(context) {
       return errorResponse('Database list operation failed', 500);
     }
 
+    const entries = listResult.keys.filter(item => !item.name.startsWith('manage@')
+      && !item.name.startsWith('chunk_') && item.metadata?.TimeStamp);
+    const manifests = new Map();
+    if (includeValue) {
+      const ids = entries.filter(item => needsChunkManifest(item.metadata)).map(item => item.name);
+      // A full 1,000-item page needs at most 40 D1 reads, with room for
+      // authorization, the list query, and storage-channel configuration.
+      for (let i = 0; i < ids.length; i += 25) {
+        const group = ids.slice(i, i + 25);
+        const values = typeof db.getFileValues === 'function'
+          ? await db.getFileValues(group)
+          : new Map(await Promise.all(group.map(async id => [id, await db.get(id)])));
+        for (const [id, value] of values) manifests.set(id, value);
+      }
+    }
+
     // 处理记录
     const records = [];
+    // A page can contain 1,000 original WebDAV records. Load shared channel
+    // configuration at most once, not once per file/KV subrequest.
+    let backupConfig;
+    const getBackupConfig = () => backupConfig ??= loadChannelConfig(db, env, 'file backup');
     
-    for (const item of listResult.keys) {
-      // 跳过管理相关的键（以 manage@ 开头）
-      if (item.name.startsWith('manage@')) {
-        continue;
-      }
-      
-      // 跳过分块数据键（以 chunk_ 开头）
-      if (item.name.startsWith('chunk_')) {
-        continue;
-      }
-
-      // 跳过没有元数据或有效时间戳的记录
-      if (!item.metadata || !item.metadata.TimeStamp) {
-        continue;
-      }
-
+    for (const item of entries) {
       // 构建记录对象
       const record = {
         id: item.name,
-        metadata: item.metadata,
+        metadata: includeValue
+          ? await prepareMetadataForBackup(db, env, item.metadata, getBackupConfig)
+          : await prepareMetadataForStorage(item.metadata),
       };
 
       // 如果需要包含 value 且是分块文件，读取 value
-      if (includeValue && isChunkedFileNeedingValue(item.metadata)) {
+      if (includeValue && needsChunkManifest(item.metadata)) {
         try {
-          const value = await db.get(item.name);
-          if (value) {
-            record.value = value;
-          }
-        } catch (valueError) {
-          // 读取 value 失败时记录错误但继续处理
-          console.error(`Failed to read value for ${item.name}:`, valueError);
+          const value = manifests.get(item.name);
+          parseChunkManifest(value, item.metadata);
+          record.value = value;
+        } catch {
+          return errorResponse(`Cannot export chunk manifest for ${item.name}; verify the file and retry the backup.`, 500);
         }
       }
 

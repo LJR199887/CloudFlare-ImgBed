@@ -43,18 +43,17 @@ function UnauthorizedException(reason) {
 }
 
 /**
- * 根据请求路径提取所需权限
- * @param {string} pathname - 请求路径
+ * Match the route, not dynamic file/folder names. Unknown actions fail closed.
+ * @param {Request} request
  * @returns {string} 需要的权限类型
  */
-function extractRequiredPermission(pathname) {
-  const pathParts = pathname.toLowerCase().split('/');
-
-  if (pathParts.includes('delete')) {
+function extractRequiredPermission(request) {
+  const url = new URL(request.url);
+  if (/^\/api\/manage\/delete\/.+/.test(url.pathname) && ['GET', 'POST', 'DELETE'].includes(request.method)) {
     return 'delete';
   }
-
-  if (pathParts.includes('list')) {
+  if (/^\/api\/manage\/list\/?$/.test(url.pathname) && ['GET', 'HEAD'].includes(request.method)
+      && ['', 'info', 'index-storage-stats'].includes(url.searchParams.get('action') || '')) {
     return 'list';
   }
 
@@ -79,8 +78,7 @@ async function authentication(context) {
     });
   }
 
-  const pathname = new URL(context.request.url).pathname;
-  const requiredPermission = extractRequiredPermission(pathname);
+  const requiredPermission = extractRequiredPermission(context.request);
 
   const result = await authenticate({
     env: context.env,

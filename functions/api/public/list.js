@@ -1,5 +1,6 @@
 import { fetchOthersConfig } from "../../utils/sysConfig";
 import { readIndex } from '../../utils/indexManager.js';
+import { publicFileMetadata } from '../../utils/metadata/metadataSecurity.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -232,7 +233,7 @@ export async function onRequest(context) {
         // 转换文件格式
         const safeFiles = filteredFiles.map(file => ({
             name: file.id,
-            metadata: file.metadata
+            metadata: publicFileMetadata(file.metadata)
         }));
 
         return new Response(JSON.stringify({

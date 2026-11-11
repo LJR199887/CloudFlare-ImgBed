@@ -1,6 +1,7 @@
 // WebDAV 服务支持
 import { fetchOthersConfig } from "../utils/sysConfig";
 import { getDatabase } from "../utils/databaseAdapter";
+import { applyDownloadPolicy, fetchFileForDisplay, pickHeaders, DOWNLOAD_RESPONSE_HEADERS } from '../utils/downloadPolicy.js';
 import { createApiToken } from "../api/manage/apiTokens";
 
 export async function onRequest(context) {
@@ -11,6 +12,10 @@ export async function onRequest(context) {
 
     // 从请求路径中替换第一个 /dav 部分
     const url = new URL(request.url);
+    let segments;
+    try { segments = decodeURIComponent(url.pathname).split(/[\\/]/); }
+    catch { return new Response('Invalid path encoding', { status: 400 }); }
+    if (segments.some(segment => segment === '.' || segment === '..')) return new Response('Invalid relative path', { status: 400 });
     url.pathname = url.pathname.replace(/^\/dav/, '') || '/';
     const modifiedRequest = new Request(url.toString(), request);
 
@@ -67,7 +72,8 @@ async function checkAuth(request, env) {
 
     const davUser = othersConfig.webDAV.username;
     const davPass = othersConfig.webDAV.password;
-    if (!davUser || !davPass) return null; // No auth required
+    if (!davUser && !davPass) return null; // Explicit anonymous mode.
+    if (!davUser || !davPass) return new Response('Incomplete WebDAV authentication configuration', { status: 503 });
 
     const authHeader = request.headers.get('Authorization');
     if (!authHeader) {
@@ -82,8 +88,12 @@ async function checkAuth(request, env) {
         return new Response('Malformed Authorization header', { status: 400 });
     }
 
-    const [user, pass] = atob(encoded).split(':');
-    if (user !== davUser || pass !== davPass) {
+    let decoded;
+    try { decoded = atob(encoded); } catch { return new Response('Malformed Basic credentials', { status: 400 }); }
+    const separator = decoded.indexOf(':');
+    const user = decoded.slice(0, separator);
+    const pass = decoded.slice(separator + 1);
+    if (separator < 0 || user !== davUser || pass !== davPass) {
         return new Response('Invalid credentials', { status: 403 });
     }
 
@@ -111,22 +121,25 @@ async function handleGet(request, env) {
             const dir = path === '/' ? '' : path.substring(1, path.length - 1);
             const contents = await fetchDirectoryContents(dir, env, request);
             const html = generateDirectoryListingHtml(path, contents);
-            return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+            return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Content-Type-Options': 'nosniff',
+                'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'" } });
         } catch (error) {
             console.error('GET (directory) failed:', error.stack);
             return new Response(`Error listing directory: ${error.message}`, { status: 500 });
         }
     } else { // File download
         try {
-            const fileUrl = new URL(`/file${path}`, request.url);
+            const fileUrl = new URL(`/file${encodeDavPath(path)}`, request.url);
 
-            const fileResponse = await fetch(fileUrl.toString());
+            const fileResponse = await fetchFileForDisplay(fileUrl.toString(), env);
 
             if (!fileResponse.ok) {
                  return new Response('File not found', { status: fileResponse.status, statusText: fileResponse.statusText });
             }
 
-            const response = new Response(fileResponse.body, fileResponse);
+            const headers = pickHeaders(fileResponse.headers, DOWNLOAD_RESPONSE_HEADERS);
+            applyDownloadPolicy(headers, headers.get('Content-Type'), encodeURIComponent(path.split('/').pop()));
+            const response = new Response(fileResponse.body, { status: fileResponse.status, headers });
             response.headers.set('Access-Control-Allow-Origin', '*');
 
             return response;
@@ -207,7 +220,7 @@ async function handleDelete(request, env) {
     const isFolder = path.endsWith('/');
     const cleanPath = isFolder ? path.slice(0, -1) : path;
     
-    const deleteUrl = new URL(`/api/manage/delete/${cleanPath}`, request.url);
+    const deleteUrl = new URL(`/api/manage/delete/${encodeDavPath(cleanPath)}`, request.url);
     if (isFolder) deleteUrl.searchParams.set('folder', 'true');
 
     try {
@@ -272,6 +285,15 @@ async function fetchDirectoryContents(dir, env, request) {
 
 // --- HTML and XML GENERATION ---
 
+function escapeMarkup(value) {
+    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(value).replace(/[&<>"']/g, c => entities[c]);
+}
+
+function encodeDavPath(path) {
+    return path.split('/').map(encodeURIComponent).join('/');
+}
+
 function generateDirectoryListingHtml(basePath, contents) {
     let fileLinks = '';
     let dirLinks = '';
@@ -279,7 +301,7 @@ function generateDirectoryListingHtml(basePath, contents) {
     for (const dir of contents.directories) {
         const fullDirPath = `/dav/${dir}/`;
         const dirName = dir.split('/').pop();
-        dirLinks += `<li><a href="${fullDirPath}"><strong>${dirName}/</strong></a></li>`;
+        dirLinks += `<li><a href="${escapeMarkup(encodeDavPath(fullDirPath))}"><strong>${escapeMarkup(dirName)}/</strong></a></li>`;
     }
 
     for (const file of contents.files) {
@@ -288,16 +310,16 @@ function generateDirectoryListingHtml(basePath, contents) {
         const fileSize = file.metadata && file.metadata['FileSize'] 
             ? `${file.metadata['FileSize']} MB` 
             : 'N/A';
-        fileLinks += `<li><a href="${fullFilePath}">${fileName}</a> - ${fileSize}</li>`;
+        fileLinks += `<li><a href="${escapeMarkup(encodeDavPath(fullFilePath))}">${escapeMarkup(fileName)}</a> - ${escapeMarkup(fileSize)}</li>`;
     }
     
     let parentDirLink = '';
     if (basePath !== '/') {
         const parentPath = new URL('..', `http://dummy.com${basePath}`).pathname;
-        parentDirLink = `<li><a href="/dav${parentPath}"><strong>../ (Parent Directory)</strong></a></li>`;
+        parentDirLink = `<li><a href="/dav${escapeMarkup(parentPath)}"><strong>../ (Parent Directory)</strong></a></li>`;
     }
 
-    return `<!DOCTYPE html><html><head><title>Index of ${basePath}</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:sans-serif;padding:20px}li{margin:5px 0}</style></head><body><h1>Index of ${basePath}</h1><ul>${parentDirLink}${dirLinks}${fileLinks}</ul></body></html>`;
+    return `<!DOCTYPE html><html><head><title>Index of ${escapeMarkup(basePath)}</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:sans-serif;padding:20px}li{margin:5px 0}</style></head><body><h1>Index of ${escapeMarkup(basePath)}</h1><ul>${parentDirLink}${dirLinks}${fileLinks}</ul></body></html>`;
 }
 
 function generateWebDAVXml(basePath, contents) {
@@ -319,7 +341,7 @@ function createCollectionXml(path) {
     const now = new Date().toUTCString();
     const cleanPath = path.endsWith('/') ? path.slice(0, -1) : path;
     const name = cleanPath.split('/').pop() || '';
-    return `<D:response><D:href>${encodeURI(path)}</D:href><D:propstat><D:prop><D:displayname>${name}</D:displayname><D:resourcetype><D:collection/></D:resourcetype><D:creationdate>${now}</D:creationdate><D:getlastmodified>${now}</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
+    return `<D:response><D:href>${escapeMarkup(encodeDavPath(path))}</D:href><D:propstat><D:prop><D:displayname>${escapeMarkup(name)}</D:displayname><D:resourcetype><D:collection/></D:resourcetype><D:creationdate>${now}</D:creationdate><D:getlastmodified>${now}</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
 }
 
 function createFileXml(file) {
@@ -337,5 +359,5 @@ function createFileXml(file) {
         ? new Date(Number(file.metadata['TimeStamp'])).toUTCString()
         : new Date().toUTCString();
     const contentType = file.metadata && file.metadata['FileType'] ? file.metadata['FileType'] : "application/octet-stream";
-    return `<D:response><D:href>${encodeURI(`/dav/${file.name}`)}</D:href><D:propstat><D:prop><D:displayname>${file.name.split('/').pop()}</D:displayname><D:resourcetype/><D:creationdate>${timestamp}</D:creationdate><D:getlastmodified>${timestamp}</D:getlastmodified><D:getcontentlength>${fileSize}</D:getcontentlength><D:getcontenttype>${contentType}</D:getcontenttype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
+    return `<D:response><D:href>${escapeMarkup(encodeDavPath(`/dav/${file.name}`))}</D:href><D:propstat><D:prop><D:displayname>${escapeMarkup(file.name.split('/').pop())}</D:displayname><D:resourcetype/><D:creationdate>${timestamp}</D:creationdate><D:getlastmodified>${timestamp}</D:getlastmodified><D:getcontentlength>${escapeMarkup(fileSize)}</D:getcontentlength><D:getcontenttype>${escapeMarkup(contentType)}</D:getcontenttype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
 }

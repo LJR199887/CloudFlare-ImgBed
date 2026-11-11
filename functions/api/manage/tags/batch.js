@@ -1,3 +1,4 @@
+import { withFileMutation } from '../../../utils/fileMutation.js';
 import { purgeCFCache } from "../../../utils/purgeCache.js";
 import { batchAddFilesToIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from "../../../utils/databaseAdapter.js";
@@ -34,7 +35,6 @@ export async function onRequest(context) {
         });
     }
 
-    const db = getDatabase(env);
 
     try {
         // Parse request body
@@ -99,43 +99,46 @@ export async function onRequest(context) {
 
         for (const fileId of fileIds) {
             try {
-                // Get file metadata
-                const fileData = await db.getWithMetadata(fileId);
+                await withFileMutation(env, [fileId], async env => {
+                    const db = getDatabase(env);
+                    // Get file metadata
+                    const fileData = await db.getWithMetadata(fileId);
 
-                if (!fileData || !fileData.metadata) {
-                    results.errors.push({
-                        fileId: fileId,
-                        error: 'File not found'
+                    if (!fileData || !fileData.metadata) {
+                        results.errors.push({
+                            fileId: fileId,
+                            error: 'File not found'
+                        });
+                        return;
+                    }
+
+                    // Get existing tags
+                    const existingTags = fileData.metadata.Tags || [];
+
+                    // Merge tags based on action
+                    const updatedTags = mergeTags(existingTags, tags, action);
+
+                    // Update metadata
+                    fileData.metadata.Tags = updatedTags;
+
+                    // Save to database
+                    await db.put(fileId, fileData.value, {
+                        metadata: fileData.metadata
                     });
-                    continue;
-                }
 
-                // Get existing tags
-                const existingTags = fileData.metadata.Tags || [];
+                    // Clear CDN cache (async)
+                    const cdnUrl = `https://${url.hostname}/file/${fileId}`;
+                    waitUntil(purgeCFCache(env, cdnUrl));
 
-                // Merge tags based on action
-                const updatedTags = mergeTags(existingTags, tags, action);
+                    // Track updated file for batch index update
+                    updatedFiles.push({
+                        fileId: fileId,
+                        metadata: fileData.metadata
+                    });
 
-                // Update metadata
-                fileData.metadata.Tags = updatedTags;
+                    results.updated++;
 
-                // Save to database
-                await db.put(fileId, fileData.value, {
-                    metadata: fileData.metadata
                 });
-
-                // Clear CDN cache (async)
-                const cdnUrl = `https://${url.hostname}/file/${fileId}`;
-                waitUntil(purgeCFCache(env, cdnUrl));
-
-                // Track updated file for batch index update
-                updatedFiles.push({
-                    fileId: fileId,
-                    metadata: fileData.metadata
-                });
-
-                results.updated++;
-
             } catch (error) {
                 results.errors.push({
                     fileId: fileId,

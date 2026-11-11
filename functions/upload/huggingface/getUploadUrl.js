@@ -1,3 +1,4 @@
+import { issueHuggingFaceGrant } from '../../utils/huggingFaceGrant.js';
 /**
  * HuggingFace 大文件直传 API
  *
@@ -11,6 +12,7 @@
  */
 
 import { HuggingFaceAPI } from '../../utils/storage/huggingfaceAPI.js';
+import { resolveFileType } from '../../utils/mimeTypes.js';
 import { fetchUploadConfig } from '../../utils/sysConfig.js';
 import { userAuthCheck, UnauthorizedResponse } from '../../utils/auth/userAuth.js';
 import { buildUniqueFileId, getUploadIp, isBlockedUploadIp, createResponse } from '../uploadTools.js';
@@ -39,9 +41,10 @@ export async function onRequestPost(context) {
         const body = await request.json();
         const { fileSize, fileName, fileType, sha256, fileSample, channelName, uploadNameType, uploadFolder } = body;
 
-        if (!fileSize || !fileName || !fileType || !sha256 || !fileSample) {
+        if (!Number.isSafeInteger(fileSize) || fileSize <= 0 || typeof fileName !== 'string' || !fileName ||
+            typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256) || typeof fileSample !== 'string' || !fileSample) {
             return createResponse(JSON.stringify({
-                error: 'Missing required fields: fileSize, fileName, fileType, sha256, fileSample'
+                error: 'Missing required fields: fileSize, fileName, sha256, fileSample'
             }), {
                 status: 400,
                 headers: { 'Content-Type': 'application/json' }
@@ -86,7 +89,7 @@ export async function onRequestPost(context) {
         }
 
         // 使用统一的文件命名函数生成文件ID
-        const fullId = await buildUniqueFileId(context, fileName, fileType || 'application/octet-stream');
+        const fullId = await buildUniqueFileId(context, fileName, resolveFileType(fileName, fileType));
 
         // 生成唯一标识符前缀（UUID格式），加在文件名前面
         const uniquePrefix = crypto.randomUUID();
@@ -99,18 +102,24 @@ export async function onRequestPost(context) {
         const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
         const uploadInfo = await huggingfaceAPI.getLfsUploadInfo(fileSize, filePath, sha256, fileSample);
 
+        if (uploadInfo.needsLfs) {
+            await issueHuggingFaceGrant(env, {
+                fullId, filePath, sha256, fileSize, fileName, fileType: resolveFileType(fileName, fileType),
+                channelName: hfChannel.name, repo: hfChannel.repo,
+            });
+        }
         // 返回上传信息
         return createResponse(JSON.stringify({
+            ...uploadInfo,
             success: true,
             fullId,
             filePath,
             channelName: hfChannel.name,
             repo: hfChannel.repo,
-            isPrivate: hfChannel.isPrivate || false,
-            ...uploadInfo
+            isPrivate: hfChannel.isPrivate || false
         }), {
             status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
         });
 
     } catch (error) {

@@ -1,4 +1,5 @@
 /* ======== 文件读取工具函数 ======== */
+import { applyDownloadPolicy, pickHeaders, DOWNLOAD_REQUEST_HEADERS } from '../utils/downloadPolicy.js';
 
 // 判断请求域名是否在允许的域名列表中
 export function isDomainAllowed(context) {
@@ -56,14 +57,10 @@ export const FILE_CACHE_CONTROL = {
 
 // 公共响应头设置函数
 export function setCommonHeaders(headers, encodedFileName, fileType, cacheControl = FILE_CACHE_CONTROL.PUBLIC) {
-    headers.set('Content-Disposition', `inline; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);
+    applyDownloadPolicy(headers, fileType || headers.get('Content-Type'), encodedFileName);
     headers.set('Access-Control-Allow-Origin', '*');
     headers.set('Accept-Ranges', 'bytes');
     headers.set('Vary', 'Range');
-
-    if (fileType) {
-        headers.set('Content-Type', fileType);
-    }
 
     headers.set('Cache-Control', cacheControl || FILE_CACHE_CONTROL.PUBLIC);
 }
@@ -77,7 +74,7 @@ export function setRangeHeaders(headers, rangeStart, rangeEnd, totalSize) {
 
 // 处理HEAD请求的公共函数
 export function handleHeadRequest(headers, etag = null) {
-    const responseHeaders = new Headers();
+    const responseHeaders = new Headers(headers);
 
     // 复制关键头部
     responseHeaders.set('Content-Length', headers.get('Content-Length') || '0');
@@ -98,13 +95,14 @@ export function handleHeadRequest(headers, etag = null) {
 }
 
 export async function getFileContent(request, targetUrl, max_retries = 2) {
+    if (!['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } });
+    const downloadHeaders = pickHeaders(request.headers, DOWNLOAD_REQUEST_HEADERS);
     let retries = 0;
     while (retries <= max_retries) {
         try {
             const response = await fetch(targetUrl, {
                 method: request.method,
-                headers: request.headers,
-                body: request.body,
+                headers: downloadHeaders,
             });
             if (response.ok || response.status === 304) {
                 return response;

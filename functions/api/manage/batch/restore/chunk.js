@@ -1,10 +1,18 @@
+import { isSafeFileId } from '../../../../utils/fileId.js';
 /**
  * BatchRestoreChunkAPI - 分批恢复数据的 API 端点
  * 
  * 接收并写入一批文件数据到 KV
  */
 
+import { withFileMutation } from '../../../../utils/fileMutation.js';
+import { parseSecuritySettings, rotateSessionEpochs } from '../../../../utils/auth/securitySettings.js';
+import { isBackupSettingKey } from '../../../../utils/backupSettings.js';
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
+import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
+import { needsChunkManifest, parseChunkManifest } from '../../../../utils/chunkManifest.js';
+import { prepareMetadataForStorage } from '../../../../utils/metadata/webdavIdentity.js';
+import { batchAddFilesToIndex } from '../../../../utils/indexManager.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -70,20 +78,31 @@ export async function onRequestPost(context) {
     const errors = [];
 
     if (type === 'files') {
+      const written = [];
+      // Leave budget for authorization, credential checks, and releasing
+      // every claim even on D1 Free (50 queries/invocation).
+      if (env.img_d1?.prepare && Object.keys(data).length > 5) {
+        return jsonResponse({ success: false, error: 'D1 file restore batches are limited to 5 records', maxBatchSize: 5 }, 413);
+      }
       // 恢复文件数据 - 并行写入
       const filePromises = Object.entries(data).map(async ([key, fileData]) => {
         try {
-          if (fileData.value) {
-            // 有 value 的文件（如 Telegram/Discord 分块文件）
-            await db.put(key, fileData.value, {
-              metadata: fileData.metadata
-            });
-          } else if (fileData.metadata) {
-            // 只有元数据的文件
-            await db.put(key, '', {
-              metadata: fileData.metadata
-            });
+          if (!fileData || typeof fileData !== 'object' || !fileData.metadata ||
+              typeof fileData.metadata !== 'object' || Array.isArray(fileData.metadata) ||
+              !isSafeFileId(key)) {
+            throw new Error('Invalid file backup record');
           }
+          const metadata = { ...fileData.metadata };
+          delete metadata.FileMutationGeneration;
+          if (needsChunkManifest(metadata)) parseChunkManifest(fileData.value, metadata);
+          await withFileMutation(env, [key], async env => {
+            const db = getDatabase(env);
+            await assertRestoredFileSafe(db, env, metadata);
+            const indexMetadata = await prepareMetadataForStorage(metadata);
+            await db.put(key, fileData.value || '', { metadata });
+            // Still update the index if claim release fails after the write.
+            written.push({ fileId: key, metadata: indexMetadata });
+          }, { requireRelease: true });
           return { success: true };
         } catch (error) {
           return { success: false, key, error: error.message };
@@ -99,15 +118,37 @@ export async function onRequestPost(context) {
           errors.push({ key: result.key, error: result.error });
         }
       }
+      if (written.length) {
+        const indexed = await batchAddFilesToIndex(context, written);
+        if (!indexed.success) {
+          return jsonResponse({ success: false, error: 'File records were written but the index update could not be queued; retry this restore page',
+            writtenCount: written.length, restoredCount, failedCount }, 503);
+        }
+      }
     } else if (type === 'settings') {
+      const normalizeKey = key => key.startsWith('manage@') ? key : `manage@${key}`;
+      const occurrences = new Map();
+      for (const key of Object.keys(data)) {
+        const fullKey = normalizeKey(key);
+        occurrences.set(fullKey, (occurrences.get(fullKey) || 0) + 1);
+      }
       // 恢复系统设置 - 并行写入
       // 备份时移除了 manage@ 前缀，恢复时需要加回来
       const settingPromises = Object.entries(data).map(async ([key, value]) => {
         try {
           // 设置值可能是对象或字符串
-          const valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
+          let valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
           // 加回 manage@ 前缀
-          const fullKey = key.startsWith('manage@') ? key : `manage@${key}`;
+          const fullKey = normalizeKey(key);
+          if (!isBackupSettingKey(fullKey)) throw new Error('Not a portable backup setting');
+          if (occurrences.get(fullKey) !== 1) throw new Error('Duplicate backup setting');
+          if (fullKey === 'manage@sysConfig@security') {
+            const security = parseSecuritySettings(valueToStore);
+            // Runtime epochs are never restored. Publish new credentials and
+            // revoke old sessions in the same settings write, without scans.
+            delete security.sessionEpochs;
+            valueToStore = JSON.stringify(rotateSessionEpochs(security));
+          }
           await db.put(fullKey, valueToStore);
           return { success: true };
         } catch (error) {

@@ -1,6 +1,7 @@
 import { fetchOthersConfig } from "../utils/sysConfig";
 import { readIndex } from "../utils/indexManager";
 import { detectDevice, resolveOrientation, addClientHintsHeaders } from "./adaptive.js";
+import { applyDownloadPolicy, fetchFileForDisplay } from '../utils/downloadPolicy.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -150,18 +151,12 @@ export async function onRequest(context) {
         if (randomType == 'img') {
             // Return an image response
             randomUrl = requestUrl.origin + randomPath;
-            let contentType = 'image/jpeg';
             const imgHeaders = new Headers(responseHeaders);
-            return new Response(await fetch(randomUrl).then(res => {
-                contentType = res.headers.get('content-type');
-                return res.blob();
-            }), {
-                headers: (() => {
-                    imgHeaders.set('Content-Type', contentType || 'image/jpeg');
-                    return imgHeaders;
-                })(),
-                status: 200
-            });
+            let upstream;
+            try { upstream = await fetchFileForDisplay(randomUrl, env); }
+            catch { return new Response('Random file unavailable', { status: 502, headers: responseHeaders }); }
+            applyDownloadPolicy(imgHeaders, upstream.headers.get('Content-Type'), encodeURIComponent(randomKey.name));
+            return new Response(upstream.body, { headers: imgHeaders, status: upstream.status });
         }
         
         if (resType == 'text') {

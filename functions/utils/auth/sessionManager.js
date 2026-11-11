@@ -23,9 +23,9 @@ const COOKIE_NAMES = {
  * @param {string} [username] - 用户名（管理员登录时使用）
  * @returns {Promise<{token: string, cookie: string}>}
  */
-export async function createSession(env, authType, username = '') {
+export async function createSession(env, authType, username = '', securityConfig = null) {
     // 读取安全策略配置
-    const securityConfig = await fetchSecurityConfig(env);
+    securityConfig ??= await fetchSecurityConfig(env);
     const accessConfig = securityConfig.access || {};
     const secure = accessConfig.sessionSecure ?? false;
     const maxAgeDays = authType === 'admin'
@@ -40,6 +40,7 @@ export async function createSession(env, authType, username = '') {
         username,
         createdAt: Date.now(),
         expiresAt: Date.now() + maxAge * 1000,
+        epoch: securityConfig.sessionEpochs?.[authType],
     };
 
     await db.put(`${SESSION_PREFIX}${token}`, JSON.stringify(sessionData), {
@@ -58,7 +59,7 @@ export async function createSession(env, authType, username = '') {
  * @param {string} authType - 要验证的认证类型 ('admin' | 'user')
  * @returns {Promise<{valid: boolean, session?: Object}>}
  */
-export async function validateSession(env, request, authType) {
+export async function validateSession(env, request, authType, securityConfig = null) {
     const cookieName = COOKIE_NAMES[authType] || 'session';
     const token = getCookieValue(request, cookieName);
     if (!token) {
@@ -77,10 +78,13 @@ export async function validateSession(env, request, authType) {
         if (session.authType !== authType) {
             return { valid: false };
         }
-        if (Date.now() > session.expiresAt) {
+        if (!Number.isFinite(session.expiresAt)) return { valid: false };
+        if (Date.now() >= session.expiresAt) {
             await db.delete(`${SESSION_PREFIX}${token}`);
             return { valid: false };
         }
+        securityConfig ??= await fetchSecurityConfig(env);
+        if (session.epoch !== securityConfig.sessionEpochs?.[authType]) return { valid: false };
         return { valid: true, session };
     } catch {
         return { valid: false };
@@ -93,12 +97,12 @@ export async function validateSession(env, request, authType) {
  * @param {Request} request - 请求对象
  * @returns {Promise<{valid: boolean, session?: Object}>}
  */
-export async function validateAnySession(env, request) {
+export async function validateAnySession(env, request, securityConfig = null) {
     // 优先检查 admin，再检查 user
-    const adminResult = await validateSession(env, request, 'admin');
+    const adminResult = await validateSession(env, request, 'admin', securityConfig);
     if (adminResult.valid) return adminResult;
 
-    const userResult = await validateSession(env, request, 'user');
+    const userResult = await validateSession(env, request, 'user', securityConfig);
     if (userResult.valid) return userResult;
 
     return { valid: false };

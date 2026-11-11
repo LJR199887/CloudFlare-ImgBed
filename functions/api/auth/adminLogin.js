@@ -19,7 +19,7 @@ export async function onRequestPost(context) {
 
     // 管理员未配置，无需认证，直接创建会话
     if (!adminConfigured) {
-        const { cookie } = await createSession(env, 'admin');
+        const { cookie } = await createSession(env, 'admin', '', securityConfig);
         return new Response(JSON.stringify({ success: true }), {
             status: 200,
             headers: {
@@ -52,7 +52,7 @@ export async function onRequestPost(context) {
     }
 
     // 创建会话并通过 HttpOnly Cookie 返回
-    const { cookie } = await createSession(env, 'admin');
+    const { cookie } = await createSession(env, 'admin', '', securityConfig);
 
     return new Response(JSON.stringify({ success: true }), {
         status: 200,

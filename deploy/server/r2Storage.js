@@ -3,20 +3,48 @@
  * 使用本地文件系统模拟 Cloudflare R2 的 API 接口
  */
 
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'fs';
-import { dirname, join } from 'path';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, lstatSync, realpathSync, statSync, rmSync } from 'fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { randomUUID } from 'crypto';
 
 export class LocalR2Storage {
     constructor(basePath) {
-        this.basePath = basePath;
         mkdirSync(basePath, { recursive: true });
+        this.basePath = realpathSync(basePath);
     }
 
     _filePath(key) {
-        return join(this.basePath, key);
+        const parts = typeof key === 'string' ? key.split('/') : [];
+        if (!parts.length || parts[0].toLowerCase() === '_multipart' || parts.some(part => !part || part === '.' || part === '..'
+            || /[\\:\u0000-\u001f\u007f]/.test(part)
+            || (process.platform === 'win32' && (/[<>"|?*]|[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part))))) {
+            throw new Error('Invalid local storage key');
+        }
+        return this._containedPath(...parts);
+    }
+
+    _containedPath(...parts) {
+        const target = resolve(this.basePath, ...parts);
+        const rel = relative(this.basePath, target);
+        if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('Storage path escapes root');
+        let current = this.basePath;
+        for (const part of rel.split(sep)) {
+            current = join(current, part);
+            try {
+                if (lstatSync(current).isSymbolicLink()) throw new Error('Symbolic links are not allowed in local storage');
+            } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                break;
+            }
+        }
+        return target;
+    }
+
+    async head(key) {
+        try { return { size: statSync(this._filePath(key)).size }; }
+        catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     }
 
     /**
@@ -59,7 +87,7 @@ export class LocalR2Storage {
      * 存储文件（模拟 R2 的 put 方法）
      * 支持多种输入类型
      */
-    async put(key, value) {
+    async put(key, value, options) {
         const filePath = this._filePath(key);
         mkdirSync(dirname(filePath), { recursive: true });
 
@@ -85,7 +113,11 @@ export class LocalR2Storage {
             buffer = Buffer.from(String(value), 'utf-8');
         }
 
-        writeFileSync(filePath, buffer);
+        this._filePath(key); // recheck after awaiting the incoming body
+        const createOnly = options?.onlyIf?.get?.('If-None-Match') === '*';
+        try { writeFileSync(filePath, buffer, { flag: createOnly ? 'wx' : 'w' }); }
+        catch (error) { if (createOnly && error.code === 'EEXIST') return null; throw error; }
+        return { size: buffer.length };
     }
 
     /**
@@ -102,8 +134,9 @@ export class LocalR2Storage {
      * 创建分块上传（模拟 R2 的 createMultipartUpload 方法）
      */
     async createMultipartUpload(key) {
+        this._filePath(key);
         const uploadId = randomUUID();
-        const uploadDir = join(this.basePath, '_multipart', uploadId);
+        const uploadDir = this._containedPath('_multipart', uploadId);
         mkdirSync(uploadDir, { recursive: true });
 
         // 保存 key 映射
@@ -129,12 +162,20 @@ export class LocalR2Storage {
 
     _createMultipartMethods(key, uploadId) {
         const self = this;
-        const uploadDir = join(this.basePath, '_multipart', uploadId);
+        this._filePath(key);
+        if (typeof uploadId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uploadId)) throw new Error('Invalid multipart upload ID');
+        const marker = () => self._containedPath('_multipart', uploadId, '_key');
+        const ensureUpload = () => {
+            if (!existsSync(marker()) || readFileSync(marker(), 'utf8') !== key) throw new Error('Multipart upload does not match storage key');
+        };
+        const partFile = number => {
+            if (!Number.isInteger(number) || number < 1 || number > 10000) throw new Error('Invalid multipart part number');
+            return self._containedPath('_multipart', uploadId, `part_${String(number).padStart(6, '0')}`);
+        };
 
         return {
             async uploadPart(partNumber, data) {
-                mkdirSync(uploadDir, { recursive: true });
-                const partPath = join(uploadDir, `part_${String(partNumber).padStart(6, '0')}`);
+                ensureUpload();
                 let buffer;
                 if (data instanceof ArrayBuffer) {
                     buffer = Buffer.from(data);
@@ -154,35 +195,41 @@ export class LocalR2Storage {
                 } else {
                     buffer = Buffer.from(data);
                 }
-                writeFileSync(partPath, buffer);
+                ensureUpload();
+                writeFileSync(partFile(partNumber), buffer);
                 return { etag: `etag_${partNumber}`, partNumber };
             },
 
             async complete(parts) {
+                ensureUpload();
                 // 按 partNumber 排序合并所有分块
                 const sortedParts = parts.sort((a, b) => a.partNumber - b.partNumber);
                 const chunks = [];
                 for (const part of sortedParts) {
-                    const partPath = join(uploadDir, `part_${String(part.partNumber).padStart(6, '0')}`);
-                    if (existsSync(partPath)) {
-                        chunks.push(readFileSync(partPath));
-                    }
+                    const partPath = partFile(part.partNumber);
+                    if (!existsSync(partPath)) throw new Error('Multipart part missing');
+                    chunks.push(readFileSync(partPath));
                 }
                 const merged = Buffer.concat(chunks);
-                await self.put(key, merged);
+                const object = await self.put(key, merged, { onlyIf: new Headers({ 'If-None-Match': '*' }) });
+                if (!object) throw new Error('Multipart target already exists');
 
                 // 清理分块目录
-                self._cleanupDir(uploadDir);
+                self._cleanupMultipart(uploadId);
             },
 
             async abort() {
+                if (!existsSync(marker())) return;
+                ensureUpload();
                 // 清理分块目录
-                self._cleanupDir(uploadDir);
+                self._cleanupMultipart(uploadId);
             }
         };
     }
 
-    _cleanupDir(dir) {
+    _cleanupMultipart(uploadId) {
+        if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uploadId)) throw new Error('Invalid multipart upload ID');
+        const dir = this._containedPath('_multipart', uploadId);
         if (existsSync(dir)) {
             try {
                 rmSync(dir, { recursive: true, force: true });

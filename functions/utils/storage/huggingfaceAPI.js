@@ -504,18 +504,34 @@ export class HuggingFaceAPI {
     /**
      * 获取文件内容（用于私有仓库代理）
      */
-    async getFileContent(filePath) {
-        const fileUrl = `${this.baseURL}/datasets/${this.repo}/resolve/main/${filePath}`;
-        return await fetch(fileUrl, {
-            headers: this.isPrivate ? { 'Authorization': `Bearer ${this.token}` } : {}
-        });
+    async getFileContent(filePath, range = null) {
+        let url = new URL(this.getFileURL(filePath));
+        const headers = new Headers();
+        if (range) headers.set('Range', range);
+        if (this.isPrivate && this.token) headers.set('Authorization', `Bearer ${this.token}`);
+        for (let redirects = 0; redirects <= 5; redirects++) {
+            const response = await fetch(url.toString(), { headers: new Headers(headers), redirect: 'manual' });
+            if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+            const location = response.headers.get('Location');
+            await response.body?.cancel();
+            if (!location) throw new Error('Invalid file redirect');
+            const next = new URL(location, url);
+            if (next.protocol !== 'https:' || next.username || next.password) throw new Error('Unsafe file redirect');
+            if (next.origin !== url.origin) headers.delete('Authorization');
+            url = next;
+        }
+        throw new Error('Too many file redirects');
     }
 
     /**
      * 获取文件 URL
      */
     getFileURL(filePath) {
-        return `${this.baseURL}/datasets/${this.repo}/resolve/main/${filePath}`;
+        const encodePath = value => String(value).split('/').map(segment => {
+            if (!segment || segment === '.' || segment === '..') throw new Error('Invalid repository file path');
+            return encodeURIComponent(segment);
+        }).join('/');
+        return `${this.baseURL}/datasets/${encodePath(this.repo)}/resolve/main/${encodePath(filePath)}`;
     }
 
     static getMetadataFileSize(metadata = {}) {

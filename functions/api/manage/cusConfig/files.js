@@ -1,4 +1,5 @@
 import { readIndex } from "../../../utils/indexManager";
+import { stripSensitiveMetadata } from '../../../utils/metadata/metadataSecurity.js';
 
 export async function onRequest(context) {
     const { request } = context;
@@ -21,7 +22,7 @@ export async function onRequest(context) {
     const files = allRecords.files.filter(item => item.metadata?.UploadIP === ip);
 
     return new Response(JSON.stringify({
-        data: files.slice(start, start + count),
+        data: files.slice(start, start + count).map(file => ({ ...file, metadata: stripSensitiveMetadata(file.metadata) })),
         total: files.length,
     }), {
         headers: { "Content-Type": "application/json" }

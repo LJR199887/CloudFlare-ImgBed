@@ -25,7 +25,7 @@ export async function onRequestPost(context) {
     }
 
     // 创建会话并通过 HttpOnly Cookie 返回
-    const { cookie } = await createSession(env, 'user');
+    const { cookie } = await createSession(env, 'user', '', securityConfig);
 
     return new Response('Login success', {
         status: 200,

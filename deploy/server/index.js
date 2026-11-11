@@ -14,6 +14,8 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { SqliteD1 } from './sqliteD1.js';
 import { LocalR2Storage } from './r2Storage.js';
 import { startCleanupScheduler } from './cleanupScheduler.js';
+import { fetchPublicHop } from './publicDownload.js';
+import { createDecodedFetch } from './decodedFetch.js';
 
 const NativeResponse = globalThis.Response;
 
@@ -36,7 +38,7 @@ if (typeof globalThis.caches === 'undefined') {
 // 这样 url.origin 保持为外部 origin，确保 Referer 匹配、返回链接、重定向等功能正常
 
 const selfOrigins = new Set();
-const originalFetch = globalThis.fetch;
+const originalFetch = createDecodedFetch(globalThis.fetch);
 
 globalThis.fetch = async function(input, init) {
     try {
@@ -120,6 +122,7 @@ const r2Storage = new LocalR2Storage(join(DATA_DIR, 'r2'));
 function createEnv() {
     return {
         ...process.env,
+        fetchPublicHop,
         img_d1: sqliteD1,
         img_r2: r2Storage,
     };

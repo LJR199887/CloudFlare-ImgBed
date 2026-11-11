@@ -4,6 +4,8 @@
  * 向后兼容旧版 SHA-256 哈希和明文密码存储
  */
 
+import { SECURITY_SETTINGS_KEY, writeSecuritySettingsIfCurrent } from './securitySettings.js';
+
 const HASH_PREFIX_SHA256 = '$sha256$';
 const HASH_PREFIX_PBKDF2 = '$pbkdf2$';
 const PBKDF2_ITERATIONS = 100000;
@@ -185,7 +187,11 @@ export async function rehashIfNeeded(db, plainPassword, storedPassword, configPa
         return;
     }
     try {
-        const settingsStr = await db.get('manage@sysConfig@security');
+        // A login must never write back credentials from an older snapshot
+        // after settings restore. KV has no compare-and-swap for this key.
+        if (!db.db?.prepare) return;
+        const hash = await hashPassword(plainPassword);
+        const settingsStr = await db.get(SECURITY_SETTINGS_KEY);
         if (!settingsStr) return;
         const settings = JSON.parse(settingsStr);
 
@@ -195,10 +201,10 @@ export async function rehashIfNeeded(db, plainPassword, storedPassword, configPa
         for (let i = 0; i < keys.length - 1; i++) {
             target = target?.[keys[i]];
         }
-        if (!target) return;
+        if (target?.[keys[keys.length - 1]] !== storedPassword) return;
 
-        target[keys[keys.length - 1]] = await hashPassword(plainPassword);
-        await db.put('manage@sysConfig@security', JSON.stringify(settings));
+        target[keys[keys.length - 1]] = hash;
+        await writeSecuritySettingsIfCurrent(db, settingsStr, settings);
     } catch (e) {
         console.error(`Failed to rehash password at ${configPath}:`, e);
     }

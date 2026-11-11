@@ -4,6 +4,8 @@
  */
 
 import { D1Database } from './d1Database.js';
+import { prepareMetadataForStorage } from './metadata/webdavIdentity.js';
+import { assertLegacyWriteSafe } from './metadata/writeSafety.js';
 
 /**
  * 创建数据库适配器
@@ -14,10 +16,10 @@ export function createDatabaseAdapter(env) {
     // 检查是否配置了数据库
     if (env.img_url && typeof env.img_url.get === 'function') {
         // 使用KV存储
-        return new KVAdapter(env.img_url);
+        return new KVAdapter(env.img_url, env);
     } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
         // 使用D1数据库
-        return new D1Database(env.img_d1);
+        return new D1Database(env.img_d1, env);
     } else {
         console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
         return null;
@@ -29,13 +31,18 @@ export function createDatabaseAdapter(env) {
  * 保持与原有KV接口的兼容性
  */
 class KVAdapter {
-    constructor(kv) {
+    constructor(kv, env) {
         this.kv = kv;
+        this.env = env;
     }
 
     // 直接代理到KV的方法
     async put(key, value, options) {
         options = options || {};
+        if (options.metadata) {
+            await assertLegacyWriteSafe(this, this.env, key, options.metadata);
+            options = { ...options, metadata: await prepareMetadataForStorage(options.metadata) };
+        }
         return await this.kv.put(key, value, options);
     }
 
@@ -44,9 +51,48 @@ class KVAdapter {
         return await this.kv.get(key, options);
     }
 
+    async getFileValues(ids) {
+        if (ids.length === 1) return new Map([[ids[0], await this.get(ids[0])]]);
+        try {
+            const values = await this.kv.get(ids);
+            if (values instanceof Map) return values;
+        } catch (error) {
+            // Split oversized responses; older emulators may only support a
+            // single key. Do not turn outages into a burst of scalar reads.
+            if (!(error instanceof TypeError) && error.status !== 413 && !/\b413\b/.test(error.message)) throw error;
+        }
+        const mid = Math.ceil(ids.length / 2);
+        return new Map([...await this.getFileValues(ids.slice(0, mid)), ...await this.getFileValues(ids.slice(mid))]);
+    }
+
     async getWithMetadata(key, options) {
         options = options || {};
         return await this.kv.getWithMetadata(key, options);
+    }
+
+    async getIndexFiles(ids) {
+        if (!ids.length) return [];
+        if (ids.length > 100) {
+            const mid = Math.ceil(ids.length / 2);
+            return [...await this.getIndexFiles(ids.slice(0, mid)), ...await this.getIndexFiles(ids.slice(mid))];
+        }
+        if (ids.length === 1) {
+            const record = await this.getWithMetadata(ids[0]);
+            return record?.metadata ? [{ id: ids[0], metadata: record.metadata }] : [];
+        }
+        try {
+            const records = await this.kv.getWithMetadata(ids);
+            if (records instanceof Map) return ids.flatMap(id => {
+                const record = records.get(id);
+                return record?.metadata ? [{ id, metadata: record.metadata }] : [];
+            });
+        } catch (error) {
+            if (!(error instanceof TypeError) && error.status !== 413 && !/\b413\b/.test(error.message)) throw error;
+        }
+        // Older emulators only accept scalar keys; large bulk responses can
+        // also exceed KV's 25 MiB limit. Split without suppressing real errors.
+        const mid = Math.ceil(ids.length / 2);
+        return [...await this.getIndexFiles(ids.slice(0, mid)), ...await this.getIndexFiles(ids.slice(mid))];
     }
 
     async delete(key, options) {

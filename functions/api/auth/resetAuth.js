@@ -1,5 +1,6 @@
 import { getDatabase } from "../../utils/databaseAdapter.js";
 import { destroySessionsByAuthType } from "../../utils/auth/sessionManager.js";
+import { rotateSessionEpochs, writeSecuritySettingsIfCurrent } from '../../utils/auth/securitySettings.js';
 
 /**
  * 认证重置接口
@@ -40,11 +41,12 @@ export async function onRequestGet(context) {
 
         // 读取现有安全配置
         const settingsStr = await db.get('manage@sysConfig@security');
-        if (settingsStr) {
-            const settings = JSON.parse(settingsStr);
-            // 只清除认证信息，保留其他安全设置（审核、域名白名单等）
-            delete settings.auth;
-            await db.put('manage@sysConfig@security', JSON.stringify(settings));
+        const settings = settingsStr ? JSON.parse(settingsStr) : {};
+        // 只清除认证信息，保留其他安全设置（审核、域名白名单等）
+        delete settings.auth;
+        rotateSessionEpochs(settings);
+        if (!await writeSecuritySettingsIfCurrent(db, settingsStr, settings)) {
+            return Response.json({ error: 'Security configuration changed; retry reset' }, { status: 409 });
         }
 
         // 清除所有会话

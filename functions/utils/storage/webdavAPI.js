@@ -11,9 +11,13 @@ export class WebDAVAPI {
             throw new Error('WebDAV baseUrl is required');
         }
 
-        this.baseUrl = normalizeBaseUrl(baseUrl);
-        this.username = config.username || '';
-        this.password = config.password || '';
+        // Fetch rejects userinfo in request URLs. Support historical channel
+        // URLs by transferring it to Basic auth, never to a URL or Destination.
+        const url = new URL(normalizeBaseUrl(baseUrl));
+        this.username = config.username || decodeURIComponent(url.username);
+        this.password = config.password || decodeURIComponent(url.password);
+        url.username = url.password = '';
+        this.baseUrl = url.toString();
         this.headers = normalizeHeaders(config.headers || config.customHeaders || {});
         this.createDirectory = config.createDirectory !== false;
     }
@@ -24,7 +28,9 @@ export class WebDAVAPI {
 
     buildPublicUrl(path, publicUrl = '') {
         if (!publicUrl) return '';
-        return buildWebDAVUrl(normalizeBaseUrl(publicUrl), path);
+        const url = new URL(normalizeBaseUrl(publicUrl));
+        url.username = url.password = '';
+        return buildWebDAVUrl(url.toString(), path);
     }
 
     getRequestHeaders(extraHeaders = {}) {
@@ -44,6 +50,8 @@ export class WebDAVAPI {
     }
 
     async ensureDirectory(path) {
+        // Reject the complete path before the first MKCOL/MOVE side effect.
+        this.buildObjectUrl(path);
         if (!this.createDirectory) return;
 
         const dirParts = getDirectoryParts(path);
@@ -60,7 +68,7 @@ export class WebDAVAPI {
 
             // 405 commonly means the collection already exists. Some servers return 200/204.
             if (![200, 201, 204, 405].includes(response.status)) {
-                throw new Error(`WebDAV MKCOL failed for ${currentPath}: ${response.status} ${response.statusText}`);
+                throw Object.assign(new Error(`WebDAV MKCOL failed for ${currentPath}: ${response.status} ${response.statusText}`), { status: response.status });
             }
         }
     }
@@ -76,9 +84,9 @@ export class WebDAVAPI {
             redirect: 'manual',
         });
 
-        if (!isSuccessStatus(response.status)) {
+        if (![200, 201, 204].includes(response.status)) {
             const detail = await safeReadResponseText(response);
-            throw new Error(`WebDAV PUT failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            throw Object.assign(new Error(`WebDAV PUT failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`), { status: response.status });
         }
 
         return response;
@@ -99,10 +107,34 @@ export class WebDAVAPI {
         return response;
     }
 
+    // Application-level moves use COPY + DB commit + DELETE. MOVE would
+    // destroy the source before a failed database write can be recovered.
+    async copyFile(oldPath, newPath, overwrite = false) {
+        const source = this.buildObjectUrl(oldPath);
+        await this.ensureDirectory(newPath);
+        const response = await fetch(source, {
+            method: 'COPY',
+            headers: this.getRequestHeaders({
+                Destination: this.buildObjectUrl(newPath),
+                Overwrite: overwrite ? 'T' : 'F',
+                Depth: '0',
+            }),
+            redirect: 'manual',
+        });
+        // 207 may contain per-resource failures; never treat it as success.
+        if (![200, 201, 204].includes(response.status)) {
+            const detail = await safeReadResponseText(response);
+            throw new Error(`WebDAV COPY failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+        }
+        await response.body?.cancel();
+        return true;
+    }
+
     async moveFile(oldPath, newPath, overwrite = true) {
+        const source = this.buildObjectUrl(oldPath);
         await this.ensureDirectory(newPath);
 
-        const response = await fetch(this.buildObjectUrl(oldPath), {
+        const response = await fetch(source, {
             method: 'MOVE',
             headers: this.getRequestHeaders({
                 Destination: this.buildObjectUrl(newPath),
@@ -129,9 +161,13 @@ export class WebDAVAPI {
         // DELETE is idempotent for app semantics; a missing remote object should not block DB cleanup.
         if (response.status === 404) return true;
 
-        if (!isSuccessStatus(response.status)) {
+        if (![200, 204].includes(response.status)) {
             const detail = await safeReadResponseText(response);
-            throw new Error(`WebDAV DELETE failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            // 202 only acknowledges an asynchronous deletion; 207 may hide a
+            // per-resource failure. Neither confirms that the key is reusable.
+            const error = new Error(`WebDAV DELETE failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
+            error.status = response.status;
+            throw error;
         }
 
         return true;
@@ -157,6 +193,9 @@ export function normalizeBaseUrl(baseUrl) {
 }
 
 export function buildWebDAVUrl(baseUrl, path) {
+    if (String(path).split(/[\\/]/).some(part => part === '.' || part === '..')) {
+        throw new Error('Invalid relative WebDAV path');
+    }
     const cleanPath = String(path || '')
         .replace(/^\/+/, '')
         .split('/')

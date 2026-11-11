@@ -1,11 +1,14 @@
+import { needsPagedFolderMutation, runPagedFolderMutation } from '../../../utils/folderMutation.js';
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
+import { deletionMayStillApply, withFileMutation } from '../../../utils/fileMutation.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
 import { WebDAVAPI } from '../../../utils/storage/webdavAPI.js';
 import { resolveWebDAVConfig } from '../../../utils/webdavConfig.js';
+import { hydrateFileCredentials } from '../../../utils/metadata/fileCredentials.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -19,12 +22,24 @@ export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
 
     const url = new URL(request.url);
+    const warnings = [];
+    const warnRelease = ids => warnings.push({ ids, message: 'File deletion finished but claim release could not be verified; reconcile before reusing the name' });
 
     // 读取folder参数，判断是否为文件夹删除请求
     const folder = url.searchParams.get('folder');
     if (folder === 'true') {
         try {
             params.path = decodeURIComponent(params.path);
+            if (needsPagedFolderMutation(env)) {
+                const folder = params.path.split(',').join('/').replace(/\/$/, '');
+                return await runPagedFolderMutation(context, {
+                    folder, resultKey: 'deleted', headers: corsHeaders, warnings,
+                    async mutate(fileId, canDelete) {
+                        return await deleteFile(env, fileId, `https://${url.hostname}/file/${fileId}`, url, canDelete, warnRelease) ? fileId : null;
+                    },
+                    queueIndex: ids => batchRemoveFilesFromIndex(context, ids),
+                });
+            }
             // 使用队列存储需要处理的文件夹
             const folderQueue = [{
                 path: params.path.split(',').join('/')
@@ -51,7 +66,7 @@ export async function onRequest(context) {
                     const fileId = file.name;
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-                    const success = await deleteFile(env, fileId, cdnUrl, url);
+                    const success = await deleteFile(env, fileId, cdnUrl, url, null, warnRelease);
                     if (success) {
                         deletedFiles.push(fileId);
                     } else {
@@ -76,7 +91,8 @@ export async function onRequest(context) {
             return new Response(JSON.stringify({
                 success: true,
                 deleted: deletedFiles,
-                failed: failedFiles
+                failed: failedFiles,
+                warnings,
             }), {
                 headers: { 'Content-Type': 'application/json', ...corsHeaders }
             });
@@ -99,7 +115,7 @@ export async function onRequest(context) {
         const fileId = params.path.split(',').join('/');
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-        const success = await deleteFile(env, fileId, cdnUrl, url);
+        const success = await deleteFile(env, fileId, cdnUrl, url, null, warnRelease);
         if (!success) {
             throw new Error('Delete file failed');
         } else {
@@ -109,7 +125,8 @@ export async function onRequest(context) {
 
         return new Response(JSON.stringify({
             success: true,
-            fileId: fileId
+            fileId: fileId,
+            warnings,
         }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
@@ -125,57 +142,63 @@ export async function onRequest(context) {
 }
 
 // 删除单个文件的核心函数
-export async function deleteFile(env, fileId, cdnUrl, url) {
+export async function deleteFile(env, fileId, cdnUrl, url, canDelete = null, onReleaseFailure) {
     try {
-        // 读取图片信息
-        const db = getDatabase(env);
-        const img = await db.getWithMetadata(fileId);
+        return await withFileMutation(env, [fileId], async (env, retainClaim) => {
+            // 读取图片信息
+            const db = getDatabase(env);
+            const img = await db.getWithMetadata(fileId);
 
-        // 如果文件记录不存在，直接返回成功（幂等删除）
-        if (!img) {
-            console.warn(`File ${fileId} not found in database, skipping delete`);
+            // 如果文件记录不存在，直接返回成功（幂等删除）
+            if (!img || (img.value == null && !img.metadata)) {
+                console.warn(`File ${fileId} not found in database, skipping delete`);
+                return true;
+            }
+            if (canDelete && !canDelete(img)) return false;
+            img.metadata = await hydrateFileCredentials(env, img.metadata);
+
+            // 如果是R2渠道的图片，需要删除R2中对应的图片
+            if (img.metadata?.Channel === 'CloudflareR2') {
+                const R2DataBase = env.img_r2;
+                if (!R2DataBase) throw new Error('R2 binding not configured');
+                try { await R2DataBase.delete(fileId); }
+                catch (error) { if (deletionMayStillApply(error)) retainClaim(fileId); throw error; }
+            }
+
+            // S3 渠道的图片，需要删除S3中对应的图片
+            if (img.metadata?.Channel === 'S3') {
+                if (!await deleteS3File(img, () => retainClaim(fileId))) throw new Error('S3 deletion failed');
+            }
+
+            // Discord 渠道的图片，需要删除 Discord 中对应的消息
+            if (img.metadata?.Channel === 'Discord') {
+                if (!await deleteDiscordFile(img)) throw new Error('Discord deletion failed');
+            }
+
+            // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
+            if (img.metadata?.Channel === 'HuggingFace') {
+                if (!await deleteHuggingFaceFile(img)) throw new Error('HuggingFace deletion failed');
+            }
+
+            // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
+            if (img.metadata?.Channel === 'WebDAV') {
+                if (!await deleteWebDAVFile(env, img, () => retainClaim(fileId))) throw new Error('WebDAV deletion failed');
+            }
+
+            // 删除数据库中的记录
+            // 注意：容量统计现在由索引自动维护，删除文件后索引更新时会自动重新计算
+            await db.delete(fileId);
+
+            // 清除CDN缓存
+            await purgeCFCache(env, cdnUrl);
+
+            // 清除 api/randomFileList 等API缓存
+            const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
+            await purgeRandomFileListCache(url.origin, normalizedFolder);
+            await purgePublicFileListCache(url.origin, normalizedFolder);
+
             return true;
-        }
-
-        // 如果是R2渠道的图片，需要删除R2中对应的图片
-        if (img.metadata?.Channel === 'CloudflareR2') {
-            const R2DataBase = env.img_r2;
-            await R2DataBase.delete(fileId);
-        }
-
-        // S3 渠道的图片，需要删除S3中对应的图片
-        if (img.metadata?.Channel === 'S3') {
-            await deleteS3File(img);
-        }
-
-        // Discord 渠道的图片，需要删除 Discord 中对应的消息
-        if (img.metadata?.Channel === 'Discord') {
-            await deleteDiscordFile(img);
-        }
-
-        // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
-        if (img.metadata?.Channel === 'HuggingFace') {
-            await deleteHuggingFaceFile(img);
-        }
-
-        // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
-        if (img.metadata?.Channel === 'WebDAV') {
-            await deleteWebDAVFile(env, img);
-        }
-
-        // 删除数据库中的记录
-        // 注意：容量统计现在由索引自动维护，删除文件后索引更新时会自动重新计算
-        await db.delete(fileId);
-
-        // 清除CDN缓存
-        await purgeCFCache(env, cdnUrl);
-
-        // 清除 api/randomFileList 等API缓存
-        const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
-        await purgeRandomFileListCache(url.origin, normalizedFolder);
-        await purgePublicFileListCache(url.origin, normalizedFolder);
-
-        return true;
+        }, { onReleaseFailure });
     } catch (e) {
         console.error('Delete file failed:', e);
         return false;
@@ -183,7 +206,9 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
 }
 
 // 删除 S3 渠道的图片
-async function deleteS3File(img) {
+async function deleteS3File(img, onUncertainDelete) {
+    const m = img.metadata;
+    if (!m?.S3BucketName || !m.S3FileKey || !m.S3AccessKeyId || !m.S3SecretAccessKey) return false;
     const s3Client = new S3Client({
         region: img.metadata?.S3Region || "auto",
         endpoint: img.metadata?.S3Endpoint,
@@ -204,6 +229,7 @@ async function deleteS3File(img) {
         }));
         return true;
     } catch (error) {
+        if (deletionMayStillApply(error)) onUncertainDelete();
         console.error("S3 Delete Failed:", error);
         return false;
     }
@@ -213,20 +239,45 @@ async function deleteS3File(img) {
 async function deleteDiscordFile(img) {
     const botToken = img.metadata?.DiscordBotToken;
     const channelId = img.metadata?.DiscordChannelId;
-    const messageId = img.metadata?.DiscordMessageId;
-
-    if (!botToken || !channelId || !messageId) {
+    if (!botToken || !channelId) {
         console.warn('Discord file missing required metadata for deletion');
         return false;
     }
 
     try {
-        const discordAPI = new DiscordAPI(botToken);
-        const success = await discordAPI.deleteMessage(channelId, messageId);
-        if (!success) {
-            console.error('Discord Delete Failed: API returned false');
+        let messageIds;
+        if (img.metadata.IsChunked) {
+            const chunks = JSON.parse(img.value);
+            const expected = img.metadata.TotalChunks;
+            // Validate the entire manifest before deleting anything. A broken
+            // manifest must not cause a partially destroyed file or a lost row.
+            if (!Array.isArray(chunks) || chunks.length === 0 ||
+                (expected != null && (!Number.isInteger(expected) || expected !== chunks.length)) ||
+                chunks.some(chunk => !chunk || !Number.isInteger(chunk.index) ||
+                    chunk.index < 0 || chunk.index >= chunks.length ||
+                    typeof chunk.messageId !== 'string' || !chunk.messageId.trim()) ||
+                new Set(chunks.map(chunk => chunk.index)).size !== chunks.length) {
+                throw new Error('Invalid Discord chunk manifest');
+            }
+            messageIds = [...new Set(chunks.map(chunk => chunk.messageId))];
+        } else {
+            const messageId = img.metadata.DiscordMessageId;
+            if (typeof messageId !== 'string' || !messageId.trim()) {
+                throw new Error('Discord file missing message ID');
+            }
+            messageIds = [messageId];
         }
-        return success;
+        const discordAPI = new DiscordAPI(botToken);
+        // Sequential requests avoid a burst against the channel rate limit.
+        // Keep the full manifest on failure; already-deleted messages succeed
+        // idempotently on the next manual/automatic cleanup attempt.
+        for (const messageId of messageIds) {
+            if (!await discordAPI.deleteMessage(channelId, messageId)) {
+                console.error('Discord Delete Failed: API returned false');
+                return false;
+            }
+        }
+        return true;
     } catch (error) {
         console.error("Discord Delete Failed:", error);
         return false;
@@ -261,7 +312,7 @@ async function deleteHuggingFaceFile(img) {
 
 
 // 删除 WebDAV 渠道的图片
-async function deleteWebDAVFile(env, img) {
+async function deleteWebDAVFile(env, img, onUncertainDelete) {
     const filePath = img.metadata?.WebDAVFilePath;
 
     if (!filePath) {
@@ -279,6 +330,7 @@ async function deleteWebDAVFile(env, img) {
         const webdavAPI = new WebDAVAPI(webdavConfig);
         return await webdavAPI.deleteFile(filePath);
     } catch (error) {
+        if (deletionMayStillApply(error)) onUncertainDelete();
         console.error("WebDAV Delete Failed:", error);
         return false;
     }

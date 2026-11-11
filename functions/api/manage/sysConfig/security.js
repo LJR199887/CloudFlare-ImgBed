@@ -1,6 +1,6 @@
+import { parseSecuritySettings, rotateSessionEpochs, SECURITY_SETTINGS_KEY, validateSecuritySettings, writeSecuritySettingsIfCurrent } from '../../../utils/auth/securitySettings.js';
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { hashPassword, isHashed } from '../../../utils/auth/passwordHash.js';
-import { destroySessionsByAuthType } from '../../../utils/auth/sessionManager.js';
 
 export async function onRequest(context) {
     // 安全设置相关，GET方法读取设置，POST方法保存设置
@@ -22,6 +22,7 @@ export async function onRequest(context) {
         // 对前端隐藏实际密码值，返回占位符
         // 前端只有在用户修改密码时才会发送新密码
         const maskedSettings = JSON.parse(JSON.stringify(settings));
+        delete maskedSettings.sessionEpochs;
         if (maskedSettings.auth.user?.authCode) {
             maskedSettings.auth.user._hasPassword = true;
             maskedSettings.auth.user.authCode = ''; // 不向前端暴露密码/哈希
@@ -40,10 +41,15 @@ export async function onRequest(context) {
 
     // POST保存设置
     if (request.method === 'POST') {
-        const settings = await getSecurityConfig(db, env) // 先读取已有设置，再进行覆盖
+        const previous = await db.get(SECURITY_SETTINGS_KEY);
+        const settings = await getSecurityConfig(db, env, previous);
 
-        const body = await request.json()
-        const newSettings = body
+        let newSettings;
+        try {
+            newSettings = validateSecuritySettings(await request.json());
+        } catch {
+            return Response.json({ error: 'Invalid security configuration' }, { status: 400 });
+        }
 
         // 覆盖设置，apiTokens不在这里修改
         settings.upload = newSettings.upload || settings.upload
@@ -52,6 +58,7 @@ export async function onRequest(context) {
         // 处理认证设置：空密码表示不修改，_clear 标记表示清除密码
         let userPasswordChanged = false;
         let adminPasswordChanged = false;
+        const previousAdminUsername = settings.auth.admin.adminUsername;
 
         if (newSettings.auth) {
             if (newSettings.auth.user) {
@@ -100,15 +107,13 @@ export async function onRequest(context) {
         delete settings.auth.user?._hasPassword;
         delete settings.auth.admin?._hasPassword;
 
-        // 写入数据库
-        await db.put('manage@sysConfig@security', JSON.stringify(settings))
-
-        // 密码变更后清除对应类型的所有会话
-        if (userPasswordChanged) {
-            await destroySessionsByAuthType(env, 'user');
-        }
-        if (adminPasswordChanged) {
-            await destroySessionsByAuthType(env, 'admin');
+        const changed = [];
+        if (userPasswordChanged) changed.push('user');
+        adminPasswordChanged ||= settings.auth.admin.adminUsername !== previousAdminUsername;
+        if (adminPasswordChanged) changed.push('admin');
+        if (changed.length) rotateSessionEpochs(settings, changed);
+        if (!await writeSecuritySettingsIfCurrent(db, previous, validateSecuritySettings(settings))) {
+            return Response.json({ error: 'Security configuration changed; reload and retry' }, { status: 409 });
         }
 
         return new Response(JSON.stringify({
@@ -124,11 +129,11 @@ export async function onRequest(context) {
 
 }
 
-export async function getSecurityConfig(db, env) {
+export async function getSecurityConfig(db, env, settingsStr = undefined) {
     const settings = {}
     // 读取数据库中的设置
-    const settingsStr = await db.get('manage@sysConfig@security')
-    const settingsKV = settingsStr ? JSON.parse(settingsStr) : {}
+    if (settingsStr === undefined) settingsStr = await db.get(SECURITY_SETTINGS_KEY);
+    const settingsKV = settingsStr == null ? {} : parseSecuritySettings(settingsStr);
 
     // 认证管理
     const kvAuth = settingsKV.auth || {}
@@ -142,6 +147,10 @@ export async function getSecurityConfig(db, env) {
         }
     }
     settings.auth = auth
+    settings.sessionEpochs = Object.fromEntries(['admin', 'user'].flatMap(type => {
+        const epoch = settingsKV.sessionEpochs?.[type];
+        return typeof epoch === 'string' && epoch ? [[type, epoch]] : [];
+    }));
 
     // 上传管理
     const kvUpload = settingsKV.upload || {}
