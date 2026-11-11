@@ -8,6 +8,7 @@ const GROUPS = { S3: 's3', Telegram: 'telegram', TelegramNew: 'telegram', Discor
 // channel when the record still contains its own identity/credentials.
 export async function prepareMetadataForBackup(db, env, metadata, getConfig = () => loadChannelConfig(db, env, 'WebDAV backup')) {
     const prepared = await prepareMetadataForStorage(metadata);
+    delete prepared.FileMutationGeneration;
     if (prepared.Channel === 'WebDAV' && !prepared.WebDAVAccountId) {
         // Original WebDAV uploads did not store credentials at all. Bind these
         // unbound records to the channel they currently resolve to before export.

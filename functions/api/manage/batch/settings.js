@@ -78,6 +78,7 @@ export async function onRequestGet(context) {
       let parsedValue;
       try { parsedValue = JSON.parse(value); }
       catch { parsedValue = value; }
+      if (key === 'manage@sysConfig@security' && parsedValue && typeof parsedValue === 'object') delete parsedValue.sessionEpochs;
       settings[stripManagePrefix(key)] = parsedValue;
     }
 

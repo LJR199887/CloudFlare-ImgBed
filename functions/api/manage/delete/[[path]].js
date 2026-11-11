@@ -1,3 +1,4 @@
+import { needsPagedFolderMutation, runPagedFolderMutation } from '../../../utils/folderMutation.js';
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
@@ -27,6 +28,16 @@ export async function onRequest(context) {
     if (folder === 'true') {
         try {
             params.path = decodeURIComponent(params.path);
+            if (needsPagedFolderMutation(env)) {
+                const folder = params.path.split(',').join('/').replace(/\/$/, '');
+                return await runPagedFolderMutation(context, {
+                    folder, resultKey: 'deleted', headers: corsHeaders,
+                    async mutate(fileId, canDelete) {
+                        return await deleteFile(env, fileId, `https://${url.hostname}/file/${fileId}`, url, canDelete) ? fileId : null;
+                    },
+                    queueIndex: ids => batchRemoveFilesFromIndex(context, ids),
+                });
+            }
             // 使用队列存储需要处理的文件夹
             const folderQueue = [{
                 path: params.path.split(',').join('/')

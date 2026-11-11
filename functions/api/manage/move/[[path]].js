@@ -1,3 +1,4 @@
+import { needsPagedFolderMutation, runPagedFolderMutation } from '../../../utils/folderMutation.js';
 import { prepareMetadataForStorage } from '../../../utils/metadata/webdavIdentity.js';
 import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
@@ -25,6 +26,26 @@ export async function onRequest(context) {
     if (folder === 'true') {
         try {
             params.path = decodeURIComponent(params.path);
+            if (needsPagedFolderMutation(env)) {
+                const folder = params.path.split(',').join('/').replace(/\/$/, '');
+                const target = [dist, folder.split('/').pop()].filter(Boolean).join('/');
+                if (target === folder || target.startsWith(`${folder}/`)) {
+                    return Response.json({success:false,error:'Cannot move a folder into itself'}, {status:400});
+                }
+                const indexMetadata = new Map();
+                return await runPagedFolderMutation(context, {
+                    folder, resultKey:'processed', warnings,
+                    async mutate(fileId, canMove) {
+                        const newFileId = `${target}/${fileId.slice(folder.length + 1)}`;
+                        return await moveFile(env, fileId, newFileId, `https://${url.hostname}/file/${fileId}`, url, warnings, canMove,
+                            metadata => indexMetadata.set(newFileId, metadata))
+                            ? { fileId, newFileId } : null;
+                    },
+                    queueIndex: items => batchMoveFilesInIndex(context, items.map(({ fileId, newFileId }) => ({
+                        originalFileId: fileId, newFileId, metadata: indexMetadata.get(newFileId),
+                    }))),
+                });
+            }
             // 使用队列存储需要处理的文件夹
             const folderQueue = [{
                 path: params.path.split(',').join('/'),
@@ -132,7 +153,7 @@ export async function onRequest(context) {
 }
 
 // 移动单个文件的核心函数
-async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
+async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings, canMove = null, onMoved = null) {
     try {
         return await withFileMutation(env, [fileId, newFileId], async (env, retainClaim) => {
             const db = getDatabase(env);
@@ -140,6 +161,7 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
             // 读取图片信息
             const img = await db.getWithMetadata(fileId);
             if (!img?.metadata) throw new Error('File not found');
+            if (canMove && !canMove(img)) return false;
             if (fileId === newFileId) return true;
             // Refuse collisions before copying/deleting any storage object. In
             // particular, the destination may have protected legacy credentials.
@@ -219,6 +241,7 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
             preflightFileMutationWrite(env, newFileId, persistedMetadata);
             await copyDestination();
             await db.put(newFileId, img.value, { metadata: img.metadata });
+            onMoved?.(persistedMetadata);
 
             // Do not release the source name while its object deletion is pending:
             // uploads use this record to avoid reusing a key still being cleaned up.

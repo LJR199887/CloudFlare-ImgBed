@@ -6,7 +6,7 @@ import { isSafeFileId } from '../../../../utils/fileId.js';
  */
 
 import { withFileMutation } from '../../../../utils/fileMutation.js';
-import { parseSecuritySettings } from '../../../../utils/auth/securitySettings.js';
+import { parseSecuritySettings, rotateSessionEpochs } from '../../../../utils/auth/securitySettings.js';
 import { isBackupSettingKey } from '../../../../utils/backupSettings.js';
 import { getDatabase } from '../../../../utils/databaseAdapter.js';
 import { assertRestoredFileSafe } from '../../../../utils/metadata/writeSafety.js';
@@ -89,19 +89,21 @@ export async function onRequestPost(context) {
               !isSafeFileId(key)) {
             throw new Error('Invalid file backup record');
           }
-          if (needsChunkManifest(fileData.metadata)) parseChunkManifest(fileData.value, fileData.metadata);
+          const metadata = { ...fileData.metadata };
+          delete metadata.FileMutationGeneration;
+          if (needsChunkManifest(metadata)) parseChunkManifest(fileData.value, metadata);
           await withFileMutation(env, [key], async env => {
             const db = getDatabase(env);
-            await assertRestoredFileSafe(db, env, fileData.metadata);
+            await assertRestoredFileSafe(db, env, metadata);
             if (fileData.value) {
               // 有 value 的文件（如 Telegram/Discord 分块文件）
               await db.put(key, fileData.value, {
-                metadata: fileData.metadata
+                metadata
               });
             } else if (fileData.metadata) {
               // 只有元数据的文件
               await db.put(key, '', {
-                metadata: fileData.metadata
+                metadata
               });
             }
           }, { requireRelease: true });
@@ -132,12 +134,18 @@ export async function onRequestPost(context) {
       const settingPromises = Object.entries(data).map(async ([key, value]) => {
         try {
           // 设置值可能是对象或字符串
-          const valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
+          let valueToStore = typeof value === 'string' ? value : JSON.stringify(value);
           // 加回 manage@ 前缀
           const fullKey = normalizeKey(key);
           if (!isBackupSettingKey(fullKey)) throw new Error('Not a portable backup setting');
           if (occurrences.get(fullKey) !== 1) throw new Error('Duplicate backup setting');
-          if (fullKey === 'manage@sysConfig@security') parseSecuritySettings(valueToStore);
+          if (fullKey === 'manage@sysConfig@security') {
+            const security = parseSecuritySettings(valueToStore);
+            // Runtime epochs are never restored. Publish new credentials and
+            // revoke old sessions in the same settings write, without scans.
+            delete security.sessionEpochs;
+            valueToStore = JSON.stringify(rotateSessionEpochs(security));
+          }
           await db.put(fullKey, valueToStore);
           return { success: true };
         } catch (error) {

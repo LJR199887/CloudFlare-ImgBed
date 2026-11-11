@@ -31,12 +31,12 @@ const UNAUTHORIZED = { authorized: false, authType: null };
  * @returns {Promise<{authorized: boolean, authType: string|null}|null>}
  *          认证通过返回结果，未通过返回 null（交给调用方继续）
  */
-async function checkAdmin({ env, request, adminConfigured }) {
+async function checkAdmin({ env, request, adminConfigured, securityConfig }) {
     if (!adminConfigured) {
         return AUTHORIZED('admin'); // 未配置管理员认证，视为管理员身份放行
     }
 
-    const session = await validateSession(env, request, 'admin');
+    const session = await validateSession(env, request, 'admin', securityConfig);
     if (session.valid) {
         return AUTHORIZED('admin');
     }
@@ -51,15 +51,15 @@ async function checkAdmin({ env, request, adminConfigured }) {
  * @returns {Promise<{authorized: boolean, authType: string|null}|null>}
  *          认证通过/失败返回结果，无法判定返回 null
  */
-async function checkUser({ env, request, url, authCodeConfigured, userAuthCode }) {
+async function checkUser({ env, request, url, authCodeConfigured, userAuthCode, securityConfig }) {
     // admin session（管理员身份也可访问用户资源）
-    const adminSession = await validateSession(env, request, 'admin');
+    const adminSession = await validateSession(env, request, 'admin', securityConfig);
     if (adminSession.valid) {
         return AUTHORIZED('admin');
     }
 
     // user session
-    const userSession = await validateSession(env, request, 'user');
+    const userSession = await validateSession(env, request, 'user', securityConfig);
     if (userSession.valid) {
         return AUTHORIZED('user');
     }
@@ -121,8 +121,8 @@ export async function authenticate({
     }
 
     // --- 会话/凭据验证 ---
-    const adminCtx = { env, request, adminConfigured };
-    const userCtx = { env, request, url, authCodeConfigured, userAuthCode };
+    const adminCtx = { env, request, adminConfigured, securityConfig };
+    const userCtx = { env, request, url, authCodeConfigured, userAuthCode, securityConfig };
 
     if (authScope === AUTH_SCOPE.ADMIN) {
         return (await checkAdmin(adminCtx)) || UNAUTHORIZED;

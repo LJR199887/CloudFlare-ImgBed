@@ -20,7 +20,7 @@ export function databaseFixture(t, backend = 'KV') {
                 bind(...values) { params = values.map(v => v == null ? null : typeof v === 'boolean' ? Number(v) : v); return this; },
                 async first() { return sqlite.prepare(sql).get(...params) ?? null; },
                 async all() { return { results: sqlite.prepare(sql).all(...params) }; },
-                async run() { sqlite.prepare(sql).run(...params); return { success: true }; },
+                async run() { return { success: true, meta: { changes: sqlite.prepare(sql).run(...params).changes } }; },
             };
         } } };
         seed = (id, value, metadata) => sqlite.prepare('INSERT OR REPLACE INTO files (id, value, metadata, timestamp) VALUES (?, ?, ?, ?)')

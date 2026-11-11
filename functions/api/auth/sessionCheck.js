@@ -19,7 +19,7 @@ export async function onRequestGet(context) {
     const userRequired = !!(userAuthCode && userAuthCode.trim());
 
     // 检查会话
-    const sessionResult = await validateAnySession(env, request);
+    const sessionResult = await validateAnySession(env, request, securityConfig);
     if (sessionResult.valid) {
         return new Response(JSON.stringify({
             valid: true,

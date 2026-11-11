@@ -1346,6 +1346,10 @@ async function getAllPendingOperations(context, lastOperationId = null) {
     let operationCount = 0;
 
     try {
+        if (typeof db.listPendingIndexOperations === 'function') {
+            const rows = await db.listPendingIndexOperations(lastOperationId, MAX_OPERATION_COUNT + 1);
+            return { operations: rows.slice(0, MAX_OPERATION_COUNT), isAll: rows.length <= MAX_OPERATION_COUNT };
+        }
         while (true) {
             const response = await db.list({
                 prefix: OPERATION_KEY_PREFIX,
@@ -1567,6 +1571,20 @@ async function cleanupOperations(context, operationIds, concurrency = 10) {
         
         let deletedCount = 0;
         let errorCount = 0;
+
+        if (typeof db.deleteIndexOperations === 'function') {
+            for (let i = 0; i < operationIds.length; i += 100) {
+                const ids = operationIds.slice(i, i + 100);
+                try {
+                    await db.deleteIndexOperations(ids);
+                    deletedCount += ids.length;
+                } catch (error) {
+                    console.error('Error deleting index operation batch:', error);
+                    errorCount += ids.length;
+                }
+            }
+            return { success: true, deletedCount, errorCount };
+        }
         
         // 创建删除任务数组
         const deleteTasks = operationIds.map(operationId => {

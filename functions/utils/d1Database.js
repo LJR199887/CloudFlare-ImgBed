@@ -252,6 +252,20 @@ D1Database.prototype.deleteIndexOperation = function(operationId) {
     return stmt.bind(operationId).run();
 };
 
+// Folder pages can enqueue many operations in short succession. Keep index
+// merges from spending one D1 query per operation read and per deletion.
+D1Database.prototype.listPendingIndexOperations = async function(afterId, limit) {
+    const response = await this.db.prepare('SELECT id, type, timestamp, data FROM index_operations WHERE id > ? ORDER BY id LIMIT ?')
+        .bind(afterId || '', limit).all();
+    return (response.results || []).map(row => ({ ...row, data: JSON.parse(row.data) }));
+};
+
+D1Database.prototype.deleteIndexOperations = function(operationIds) {
+    // Callers chunk to stay within D1's 100 bound-parameter limit.
+    return this.db.prepare(`DELETE FROM index_operations WHERE id IN (${operationIds.map(() => '?').join(',')})`)
+        .bind(...operationIds).run();
+};
+
 /**
  * 列出索引操作记录
  */

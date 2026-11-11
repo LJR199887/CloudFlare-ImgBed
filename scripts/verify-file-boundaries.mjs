@@ -248,3 +248,67 @@ try {
     }
     console.log('PASS: compiled Worker fails closed on corrupt security settings');
 } finally { await mf.dispose(); }
+
+// Check the actual routes, D1 result metadata, and storage effects of a
+// multi-request folder operation and a credential restore in workerd.
+const d1Worker = new Miniflare({
+    script: await readFile(artifact, 'utf8'), modules: true, compatibilityDate: '2024-12-01',
+    host: '127.0.0.1', cf: false, d1Databases: ['img_d1'], r2Buckets: ['img_r2'],
+    serviceBindings: { ASSETS: () => new Response(null, { status: 404 }) },
+    bindings: { BASIC_USER: 'fixture-admin', BASIC_PASS: 'before' },
+});
+try {
+    const origin = await d1Worker.ready;
+    const db = await d1Worker.getD1Database('img_d1');
+    const r2 = await d1Worker.getR2Bucket('img_r2');
+    const schema = await readFile(new URL('../database/init.sql', import.meta.url), 'utf8');
+    const ddl = schema.replace(/^\s*--.*$/gm, '').split(/;\s*(?=CREATE|$)/i).filter(sql => sql.trim());
+    await db.batch(ddl.map(sql => db.prepare(sql)));
+    const req = (path, options) => fetch(new URL(path, origin), options);
+    const login = password => req('/api/auth/adminLogin', { method: 'POST', body: JSON.stringify({ username: 'fixture-admin', password }) });
+    const oldLogin = await login('before');
+    assert.equal(oldLogin.status, 200, await oldLogin.clone().text());
+    const headers = { Cookie: oldLogin.headers.get('set-cookie').split(';')[0] };
+    const ids = ['scope/a.txt', 'scope/b.txt', 'scope/sub/雪.txt', 'scope2/keep.txt'];
+    for (const id of ids) {
+        await r2.put(id, id);
+        await db.prepare('INSERT INTO files (id, value, metadata) VALUES (?, ?, ?)')
+            .bind(id, '', JSON.stringify({ Channel: 'CloudflareR2', FileName: id.split('/').at(-1) })).run();
+    }
+    const move = '/api/manage/move/scope?folder=true&dist=dest';
+    assert.equal((await req(move, { headers })).status, 413);
+    const first = await req(move + '&paged=1', { headers });
+    assert.equal(first.status, 200, await first.clone().text());
+    const page = await first.json();
+    assert.equal(page.processed.length, 2);
+    const second = await req(move + `&paged=1&cursor=${encodeURIComponent(page.nextCursor)}`, { headers });
+    assert.equal(second.status, 200, await second.clone().text());
+    assert.deepEqual((await second.json()).processed, [{ fileId: ids[2], newFileId: 'dest/' + ids[2] }]);
+    for (const id of ids.slice(0, -1)) {
+        assert.equal(await r2.head(id), null);
+        assert.equal(await (await r2.get('dest/' + id)).text(), id);
+    }
+    assert.ok(await r2.head(ids.at(-1)));
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM file_mutation_claims').first()).n, 0);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM index_operations').first()).n, 2);
+    console.log('PASS: compiled D1 Worker paginates folder moves and releases all claims');
+
+    const security = '/api/manage/sysConfig/security';
+    const save = await req(security, { method: 'POST', headers, body: JSON.stringify({ access: { whiteListMode: false } }) });
+    assert.equal(save.status, 200, await save.clone().text());
+    const update = await req(security, { method: 'POST', headers, body: JSON.stringify({ access: { whiteListMode: true } }) });
+    assert.equal(update.status, 200, await update.clone().text());
+    const restored = await req('/api/manage/batch/restore/chunk', { method: 'POST', headers, body: JSON.stringify({
+        type: 'settings', data: { 'sysConfig@security': { auth: { admin: { adminUsername: 'fixture-admin', adminPassword: 'after' } } } },
+    }) });
+    assert.equal(restored.status, 200, await restored.clone().text());
+    assert.equal((await restored.json()).restoredCount, 1);
+    assert.equal((await req(security, { headers })).status, 401);
+    assert.equal((await login('before')).status, 401);
+    const fresh = await login('after');
+    assert.equal(fresh.status, 200, await fresh.clone().text());
+    const config = await req(security, { headers: { Cookie: fresh.headers.get('set-cookie').split(';')[0] } });
+    assert.equal(config.status, 200);
+    assert.equal((await config.json()).sessionEpochs, undefined);
+    console.log('PASS: compiled D1 Worker restores security settings and rejects old sessions');
+} finally { await d1Worker.dispose(); }

@@ -1,4 +1,4 @@
-# RestoreProcessor 安全补丁
+# 管理页发布产物补丁
 
 仓库仅包含 `frontend-dist`，没有完整的 Vue 构建源码。`restoreProcessor.js`
 从原有 `381` chunk 的 source map 恢复，保留原类接口，只修复恢复顺序和进度统计：
@@ -20,3 +20,9 @@ chunk/runtime 内容哈希以及 HTML 引用。重复运行无变化。若未来
 
 `test/frontendRestore.test.js` 同时测试可读源码和 HTML 实际引用的编译产物，
 并接入真实恢复 handler、KV 适配器和 SQLite 支撑的 D1 适配器。
+
+`folderMutations.js` 让 Dashboard 的四处目录移动/删除调用在 D1 Workers 上自动续页，
+仍使用原鉴权请求函数。任一页有失败项时，整次操作不会报告成功。
+更新此脚本后运行 `node scripts/patch-folder-mutations.mjs`；它更新 Dashboard chunk、
+runtime 和 HTML，并拒绝未知的调用点布局。`test/batchLifecycleRepairs.test.js`
+验证 HTML 实际加载的补丁及真实 D1 handler 的分页行为。

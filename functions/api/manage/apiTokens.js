@@ -1,7 +1,25 @@
 import { getDatabase } from '../../utils/databaseAdapter.js';
 import { filterAutoDeleteTokens } from '../../utils/auth/tokenExpiration.js';
+import { writeSecuritySettingsIfCurrent } from '../../utils/auth/securitySettings.js';
+
+class SecurityConfigConflict extends Error {}
+
+async function saveTokenChange(db, previous, settings) {
+    if (!await writeSecuritySettingsIfCurrent(db, previous, settings)) {
+        throw new SecurityConfigConflict('Security configuration changed; reload and retry');
+    }
+}
 
 export async function onRequest(context) {
+    try {
+        return await handleRequest(context);
+    } catch (error) {
+        if (!(error instanceof SecurityConfigConflict)) throw error;
+        return Response.json({ error: error.message }, { status: 409 });
+    }
+}
+
+async function handleRequest(context) {
     // API Token管理，支持创建、删除、列出Token
     const {
       request,
@@ -123,7 +141,7 @@ async function getApiTokens(db) {
         for (const t of toDelete) {
             delete settings.apiTokens.tokens[t.id]
         }
-        await db.put('manage@sysConfig@security', JSON.stringify(settings))
+        await writeSecuritySettingsIfCurrent(db, settingsStr, settings)
     }
     
     // 返回时不包含实际token值，只返回基本信息
@@ -171,7 +189,7 @@ export async function createApiToken(db, name, permissions, owner, expiresAt = n
     settings.apiTokens.tokens[tokenId] = tokenData
     
     // 保存到数据库
-    await db.put('manage@sysConfig@security', JSON.stringify(settings))
+    await saveTokenChange(db, settingsStr, settings)
     
     return {
         id: tokenId,
@@ -198,7 +216,7 @@ export async function deleteApiToken(db, tokenId) {
     delete settings.apiTokens.tokens[tokenId]
     
     // 保存到数据库
-    await db.put('manage@sysConfig@security', JSON.stringify(settings))
+    await saveTokenChange(db, settingsStr, settings)
     
     return { success: true, message: 'Token 已删除' }
 }
@@ -218,7 +236,7 @@ async function updateApiToken(db, tokenId, permissions, expiresAt = null, autoDe
     settings.apiTokens.tokens[tokenId].autoDelete = autoDelete === true
     
     // 保存到数据库
-    await db.put('manage@sysConfig@security', JSON.stringify(settings))
+    await saveTokenChange(db, settingsStr, settings)
     
     return {
         success: true,
