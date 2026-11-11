@@ -95,17 +95,9 @@ export async function fetchSecurityConfig(env) {
         return settings;
     } catch (error) {
         console.error('Failed to fetch security config:', error);
-        // 返回默认配置
-        return {
-            auth: {
-                user: { authCode: "" },
-                admin: { adminUsername: "", adminPassword: "" }
-            },
-            upload: {
-                moderate: { enabled: false, channel: "default", moderateContentApiKey: "", nsfwApiPath: "" }
-            },
-            access: { allowedDomains: "", whiteListMode: false, sessionSecure: false, userSessionMaxAge: 14, adminSessionMaxAge: 14 }
-        };
+        // Missing settings are handled by getSecurityConfig using env/defaults.
+        // A failed read is NOT an intentionally anonymous installation.
+        throw new Error('Security configuration unavailable');
     }
 }
 

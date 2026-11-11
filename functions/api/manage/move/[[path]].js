@@ -209,15 +209,17 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url, warnings) {
 
         // 更新KV存储
         await db.put(newFileId, img.value, { metadata: img.metadata });
-        await db.delete(fileId);
 
-        // The new link is now durable. Cleanup failure must not roll it back
-        // or turn a completed move into a misleading retry/collision error.
+        // Do not release the source name while its object deletion is pending:
+        // uploads use this record to avoid reusing a key still being cleaned up.
         let cleanupWarning;
-        try { await deleteSource(); }
+        try {
+            await deleteSource();
+            await db.delete(fileId);
+        }
         catch (error) {
             console.error('Source object cleanup failed after relocation:', error);
-            cleanupWarning = { fileId, newFileId, message: 'File moved; old storage object cleanup failed' };
+            cleanupWarning = { fileId, newFileId, message: 'File moved; source cleanup incomplete; inspect the old record and object before retrying' };
             warnings.push(cleanupWarning);
         }
 

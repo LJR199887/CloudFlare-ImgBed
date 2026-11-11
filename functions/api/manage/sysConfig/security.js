@@ -128,7 +128,19 @@ export async function getSecurityConfig(db, env) {
     const settings = {}
     // 读取数据库中的设置
     const settingsStr = await db.get('manage@sysConfig@security')
-    const settingsKV = settingsStr ? JSON.parse(settingsStr) : {}
+    const settingsKV = settingsStr == null ? {} : JSON.parse(settingsStr)
+    // Syntactically valid but malformed backups must not silently erase auth.
+    const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    if (!isRecord(settingsKV) || (settingsKV.auth !== undefined && !isRecord(settingsKV.auth))) {
+        throw new Error('Invalid security configuration');
+    }
+    for (const [section, fields] of [['admin', ['adminUsername', 'adminPassword']], ['user', ['authCode']]]) {
+        const value = settingsKV.auth?.[section];
+        if (value === undefined) continue;
+        if (!isRecord(value) || fields.some(key => value[key] != null && typeof value[key] !== 'string')) {
+            throw new Error('Invalid authentication configuration');
+        }
+    }
 
     // 认证管理
     const kvAuth = settingsKV.auth || {}

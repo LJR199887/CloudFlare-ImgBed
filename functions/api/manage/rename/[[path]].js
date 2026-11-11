@@ -185,15 +185,19 @@ export async function onRequest(context) {
 
         // 更新 KV 存储
         await db.put(newFileId, fileData.value, { metadata });
-        await db.delete(fileId);
 
-        // The new link is now durable. Cleanup failure must not roll it back
-        // or turn a completed move into a misleading retry/collision error.
+        // Keep the old name occupied until its object deletion completes.
+        // Releasing it first lets a concurrent upload reuse that key and have
+        // its new bytes deleted by our delayed cleanup. Never delete the old
+        // row after an uncertain object deletion; retain it for reconciliation.
         let cleanupWarning;
-        try { await deleteSource(); }
+        try {
+            await deleteSource();
+            await db.delete(fileId);
+        }
         catch (error) {
             console.error('Source object cleanup failed after relocation:', error);
-            cleanupWarning = { fileId, newFileId, message: 'File moved; old storage object cleanup failed' };
+            cleanupWarning = { fileId, newFileId, message: 'File moved; source cleanup incomplete; inspect the old record and object before retrying' };
         }
 
         // 清除 CDN 缓存

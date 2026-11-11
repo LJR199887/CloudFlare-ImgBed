@@ -151,7 +151,7 @@ const examples = [
 
 describe('review: relocation failure ordering', () => {
     for (const backend of ['KV','D1']) for (const action of ['rename','move']) for (const example of examples) {
-        for (const failure of ['copy','put','delete-row','delete-object',null]) {
+        for (const failure of ['copy','put','put-after','delete-row','delete-row-after','delete-object','delete-object-after',null]) {
             it(`${backend} ${action} ${example.Channel}: ${failure || 'success'}`,async t=>{
                 const {env,db,seed}=databaseFixture(t,backend);
                 await db.put('manage@sysConfig@upload',JSON.stringify(uploadConfig));
@@ -167,14 +167,21 @@ describe('review: relocation failure ordering', () => {
                 const remove=async key=>{
                     steps.push('delete-object');
                     assert.ok((await db.getWithMetadata(target))?.metadata,'target must be committed');
-                    assert.equal((await db.getWithMetadata('old.png'))?.metadata??null,null,'old row must be removed before object cleanup');
+                    assert.ok((await db.getWithMetadata('old.png'))?.metadata,'old name must remain occupied during object cleanup');
                     if(failure==='delete-object')throw new Error('injected object delete failure');
                     objects.delete(key);
+                    if(failure==='delete-object-after')throw new Error('injected lost delete acknowledgement');
                 };
                 env.img_r2={get:async key=>({body:objects.get(key)}),put:async key=>copy('old.png',key),delete:remove};
                 const put=db.put.bind(db), del=db.delete.bind(db);
-                db.put=async (...args)=>{steps.push('put');if(failure==='put')throw new Error('injected db put failure'); return put(...args);};
-                db.delete=async (...args)=>{steps.push('delete-row');if(failure==='delete-row')throw new Error('injected db delete failure');return del(...args);};
+                db.put=async (...args)=>{
+                    steps.push('put'); if(failure==='put')throw new Error('injected db put failure');
+                    const result=await put(...args); if(failure==='put-after')throw new Error('injected lost put acknowledgement'); return result;
+                };
+                db.delete=async (...args)=>{
+                    steps.push('delete-row'); if(failure==='delete-row')throw new Error('injected db delete failure');
+                    const result=await del(...args); if(failure==='delete-row-after')throw new Error('injected lost row delete acknowledgement'); return result;
+                };
                 // Use the real WebDAV implementation against a controlled wire
                 // peer; the S3 command transport alone is stubbed.
                 t.mock.method(globalThis,'fetch',async (url,options)=>{
@@ -195,20 +202,22 @@ describe('review: relocation failure ordering', () => {
                 });
                 const request=new Request(`https://img.test/api/manage/${action}/old.png?dist=new`,{method:'POST',body:JSON.stringify({newFileId:target})});
                 const response=await route.onRequest({env,request,params:{path:'old.png'},waitUntil(){}});
-                if(['copy','put','delete-row'].includes(failure)){
+                if(['copy','put','put-after'].includes(failure)){
                     assert.notEqual(response.status,200);
                     assert.equal(objects.get('old.png'),'bytes');
                     assert.ok((await db.getWithMetadata('old.png'))?.metadata);
                     assert.ok(!steps.includes('delete-object'));
-                    if(failure==='delete-row')assert.ok((await db.getWithMetadata(target))?.metadata);
+                    if(failure==='put-after')assert.ok((await db.getWithMetadata(target))?.metadata);
                 }else{
                     assert.equal(response.status,200,await response.clone().text());
                     const result=await response.json();
-                    assert.deepEqual(steps,['copy','put','delete-row','delete-object']);
+                    assert.deepEqual(steps,['copy','put','delete-object',...(['delete-object','delete-object-after'].includes(failure)?[]:['delete-row'])]);
                     assert.equal(objects.get(target),'bytes');
                     assert.ok((await db.getWithMetadata(target))?.metadata);
                     assert.equal(objects.has('old.png'),failure==='delete-object');
-                    assert.equal(result.warnings?.length||0,failure==='delete-object'?1:0);
+                    assert.equal(!!(await db.getWithMetadata('old.png'))?.metadata,
+                        ['delete-object','delete-object-after','delete-row'].includes(failure));
+                    assert.equal(result.warnings?.length||0,failure?1:0);
                 }
             });
         }

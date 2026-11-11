@@ -125,4 +125,15 @@ try {
             await rm(owned,{recursive:true,force:true,maxRetries:10,retryDelay:200});
         }
     }
+    // A corrupt persisted security configuration must not enable anonymous
+    // management or let a previously valid token bypass the unavailable policy.
+    await kv.put('manage@sysConfig@security', '{');
+    for (const headers of [{}, { Authorization: 'Bearer manage-fixture' }]) {
+        const response = await req('/api/manage/metadata/list/probe.png', {
+            method: 'PATCH', headers, body: JSON.stringify({ FileName: 'unauthorized-change' }),
+        });
+        assert.equal(response.status, 401);
+        assert.equal((await kv.getWithMetadata('list/probe.png')).metadata.FileName, 'changed');
+    }
+    console.log('PASS: compiled Worker fails closed on corrupt security settings');
 } finally { await mf.dispose(); }

@@ -98,7 +98,14 @@ export async function authenticate({
     authScope = AUTH_SCOPE.EITHER,
 }) {
     // 读取安全配置
-    const securityConfig = await fetchSecurityConfig(env);
+    let securityConfig;
+    try {
+        securityConfig = await fetchSecurityConfig(env);
+    } catch {
+        // Do not downgrade a settings outage to anonymous admin/user access,
+        // including when the request carries a previously valid session/token.
+        return UNAUTHORIZED;
+    }
     const adminUsername = securityConfig.auth.admin.adminUsername;
     const adminPassword = securityConfig.auth.admin.adminPassword;
     const userAuthCode = securityConfig.auth.user.authCode;
