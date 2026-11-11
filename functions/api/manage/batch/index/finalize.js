@@ -287,7 +287,9 @@ async function saveIndex(db, files, env, expected, rebuildChunks = [], appliedOp
       return { success: false, conflict: true, error: 'KV index changed during publication; retry' };
     }
     await db.put(INDEX_META_KEY, JSON.stringify(metadata));
-    if (typeof waitUntil === 'function') waitUntil(pruneKVIndexChunks(db, metadata.chunkPrefix));
+    const pruning = pruneKVIndexChunks(db, metadata.chunkPrefix);
+    if (typeof waitUntil === 'function') waitUntil(pruning);
+    else await pruning;
 
     console.log(`Saved index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
 

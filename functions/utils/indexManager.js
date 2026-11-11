@@ -2079,8 +2079,11 @@ async function saveChunkedIndex(context, index, { expected, operationIds } = {})
             return false;
         }
         await db.put(INDEX_META_KEY, JSON.stringify(metadata));
+        const pruning = pruneKVIndexChunks(db, metadata.chunkPrefix);
         if (typeof context.waitUntil === 'function') {
-            context.waitUntil(pruneKVIndexChunks(db, metadata.chunkPrefix));
+            context.waitUntil(pruning);
+        } else {
+            await pruning;
         }
         
         console.log(`Saved chunked index: ${chunks.length} chunks, ${files.length} total files, ${totalSizeMB.toFixed(2)} MB`);
