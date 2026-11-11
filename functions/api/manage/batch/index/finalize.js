@@ -129,6 +129,7 @@ function validateRequestBody(body) {
  */
 async function readAllChunks(db, sessionId, totalChunks) {
   const missingChunks = [];
+  const stagedIds = new Set();
 
   // 读取所有分块 (0 到 totalChunks-1)
   for (let chunkId = 0; chunkId < totalChunks; chunkId++) {
@@ -149,6 +150,13 @@ async function readAllChunks(db, sessionId, totalChunks) {
         missingChunks.push(chunkId);
         continue;
       }
+      for (const file of chunkData.data) {
+        if (typeof file?.id !== 'string' || !file.id) {
+          missingChunks.push(chunkId);
+          break;
+        }
+        stagedIds.add(file.id);
+      }
 
     } catch (error) {
       console.error(`Error reading chunk ${chunkId}:`, error);
@@ -164,7 +172,7 @@ async function readAllChunks(db, sessionId, totalChunks) {
     };
   }
 
-  return { success: true };
+  return { success: true, stagedIds };
 }
 
 async function readCanonicalFiles(db) {
@@ -187,6 +195,23 @@ async function readCanonicalFiles(db) {
   files.sort((a, b) => (b.metadata.TimeStamp || 0) - (a.metadata.TimeStamp || 0)
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return files;
+}
+
+async function verifyKVFiles(db, files) {
+  // KV list() and getWithMetadata() may observe different revisions. Never
+  // acknowledge a rebuild based on a known-inconsistent snapshot. The bulk
+  // API keeps this bounded to one read per 100 file IDs in real Workers KV.
+  for (let i = 0; i < files.length; i += 100) {
+    const page = files.slice(i, i + 100);
+    const current = new Map((await db.getIndexFiles(page.map(file => file.id)))
+      .map(file => [file.id, file.metadata]));
+    if (page.some(file => !current.has(file.id)
+      || JSON.stringify(current.get(file.id)) !== JSON.stringify(file.metadata))) {
+      const error = new Error('KV file listing changed or is stale; retry the rebuild after KV propagation');
+      error.status = 409;
+      throw error;
+    }
+  }
 }
 
 /**
@@ -343,16 +368,22 @@ export async function onRequestPost(context) {
     // KV also must not republish a browser snapshot that predates a delete.
     // Its staging cannot provide an atomic snapshot, so validate presence and
     // reconstruct from the live records instead. Pending operations remain.
-    if (totalChunks > 0) {
-      const chunksResult = await readAllChunks(db, sessionId, totalChunks);
-      if (!chunksResult.success) return errorResponse('Failed to read chunks', 400, chunksResult.error);
-    }
+    const chunksResult = await readAllChunks(db, sessionId, totalChunks);
+    if (!chunksResult.success) return errorResponse('Failed to read chunks', 400, chunksResult.error);
     const allFiles = await readCanonicalFiles(db);
+    await verifyKVFiles(db, allFiles);
+    // If the client scan and server scan disagree, the KV view is unstable.
+    // Do not publish either snapshot or consume the staging session.
+    const currentIds = new Set(allFiles.map(file => file.id));
+    if (currentIds.size !== chunksResult.stagedIds.size
+      || [...currentIds].some(id => !chunksResult.stagedIds.has(id))) {
+      return errorResponse('KV files changed while rebuilding; retry after KV propagation', 409);
+    }
 
     // 8. 验证文件数量
     if (allFiles.length !== totalFiles) {
-      console.warn(`File count mismatch: expected ${totalFiles}, got ${allFiles.length}`);
-      // 不作为错误处理，继续保存实际获取的文件数量
+      return errorResponse('KV file count changed while rebuilding; retry', 409,
+        `Expected ${totalFiles}, found ${allFiles.length}`);
     }
 
     // 保存新索引
@@ -380,6 +411,7 @@ export async function onRequestPost(context) {
 
   } catch (error) {
     console.error('Error in BatchIndexFinalizeAPI:', error);
+    if (error.status === 409) return errorResponse(error.message, 409);
     return errorResponse(`Server error: ${error.message}`, 500);
   }
 }

@@ -26,19 +26,26 @@ it('KV drains a later operation whose random suffix sorts before the previous ID
     assert.equal(JSON.parse(await db.get('manage@index@meta')).lastOperationId, null);
 });
 
-it('KV replay reconciles authoritative records instead of stale operation metadata', async t => {
+it('KV add/remove events survive stale file reads until the edge cache catches up', async t => {
     const { env, db, seed } = databaseFixture(t, 'KV');
-    const original = { ...metadata, FileName: 'old.png' };
-    const current = { ...metadata, FileName: 'new.png' };
-    seed('same.png', '', current);
+    const current = { ...metadata, Channel: 'S3', FileName: 'new.png' };
     await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
-    await db.putIndexOperation('2000_z', { type: 'add', timestamp: 2000, data: { fileId: 'same.png', metadata: original } });
+    seed('same.png', '', current);
+    await db.putIndexOperation('2000_z', { type: 'add', timestamp: 2000, data: { fileId: 'same.png', metadata: current } });
+    const getWithMetadata = env.img_url.getWithMetadata.bind(env.img_url);
+    env.img_url.getWithMetadata = async key => key === 'same.png' ? null : getWithMetadata(key);
     assert.equal((await mergeOperationsToIndex(context(env))).success, true);
     assert.equal(JSON.parse(await db.get('manage@index_0'))[0].metadata.FileName, 'new.png');
+    assert.equal(await db.get('manage@index@operation_2000_z'), null);
     await db.delete('same.png');
-    await db.putIndexOperation('2000_a', { type: 'add', timestamp: 2000, data: { fileId: 'same.png', metadata: original } });
+    await db.putIndexOperation('2001_a', { type: 'remove', timestamp: 2001, data: { fileId: 'same.png' } });
+    env.img_url.getWithMetadata = async key => key === 'same.png'
+        ? { value: '', metadata: current } : getWithMetadata(key);
     assert.equal((await mergeOperationsToIndex(context(env))).success, true);
     assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 0);
+    assert.equal(await db.get('manage@index@operation_2001_a'), null);
+    env.img_url.getWithMetadata = getWithMetadata;
+    assert.deepEqual((await list({ ...context(env), request: new Request(`${origin}/api/manage/list`) }).then(r => r.json())).files, []);
 });
 
 it('KV pending-operation list errors do not report a successful empty merge', async t => {
@@ -65,7 +72,7 @@ it('D1 manual rebuild cannot republish a deleted file from stale browser staging
     assert.equal(await db.get('chunk_rebuild_stale_0'), null);
 });
 
-it('KV manual rebuild drops stale staged files and includes current records', async t => {
+it('KV manual rebuild rejects a stale staged file set and leaves the old index intact', async t => {
     const { env, db, seed } = databaseFixture(t, 'KV');
     seed('deleted.png', '', metadata);
     await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 1, chunkCount: 1, chunkSize: 5000 }));
@@ -74,9 +81,53 @@ it('KV manual rebuild drops stale staged files and includes current records', as
     await db.delete('deleted.png');
     seed('current.png', '', metadata);
     const response = await post(env, { sessionId: 'rebuild_kv', totalChunks: 1, totalFiles: 1 });
+    assert.equal(response.status, 409, await response.clone().text());
+    assert.deepEqual(JSON.parse(await db.get('manage@index_0')).map(x => x.id), ['deleted.png']);
+    assert.ok(await db.get('chunk_rebuild_kv_0'));
+});
+
+it('KV manual rebuild succeeds when staged and current records agree', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    seed('current.png', '', metadata);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    await db.put('chunk_rebuild_current_0', JSON.stringify({ data: [{ id: 'current.png', metadata }] }));
+    const response = await post(env, { sessionId: 'rebuild_current', totalChunks: 1, totalFiles: 1 });
     assert.equal(response.status, 200, await response.clone().text());
-    assert.equal((await response.json()).indexedCount, 1);
     assert.deepEqual(JSON.parse(await db.get('manage@index_0')).map(x => x.id), ['current.png']);
+});
+
+it('KV manual rebuild rejects a stale list entry after the file was deleted', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    seed('deleted.png', '', metadata);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    await db.put('chunk_rebuild_stale_kv_0', JSON.stringify({ data: [{ id: 'deleted.png', metadata }] }));
+    await db.delete('deleted.png');
+    const originalList = env.img_url.list.bind(env.img_url);
+    env.img_url.list = async options => {
+        const result = await originalList(options);
+        if (!options.prefix) result.keys.push({ name: 'deleted.png', metadata });
+        return result;
+    };
+    const response = await post(env, { sessionId: 'rebuild_stale_kv', totalChunks: 1, totalFiles: 1 });
+    assert.equal(response.status, 409, await response.clone().text());
+    assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 0);
+    assert.ok(await db.get('chunk_rebuild_stale_kv_0'));
+});
+
+it('KV manual rebuild rejects a list that omits a staged live upload', async t => {
+    const { env, db, seed } = databaseFixture(t, 'KV');
+    seed('new.png', '', metadata);
+    await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 5000 }));
+    await db.put('chunk_rebuild_missing_0', JSON.stringify({ data: [{ id: 'new.png', metadata }] }));
+    const originalList = env.img_url.list.bind(env.img_url);
+    env.img_url.list = async options => {
+        const result = await originalList(options);
+        if (!options.prefix) result.keys = result.keys.filter(key => key.name !== 'new.png');
+        return result;
+    };
+    const response = await post(env, { sessionId: 'rebuild_missing', totalChunks: 1, totalFiles: 1 });
+    assert.equal(response.status, 409, await response.clone().text());
+    assert.equal(JSON.parse(await db.get('manage@index@meta')).totalCount, 0);
 });
 
 it('D1 Free finalizes 48 staged chunks without per-chunk queries or orphan rows', async t => {
@@ -124,10 +175,13 @@ it('D1 rebuild CAS conflict leaves staged chunks intact for a retry', async t =>
 it('database fallback honors search, pagination, and count-only during a large restore', async t => {
     const { env, db, seed } = databaseFixture(t, 'D1');
     await db.put('manage@index@meta', JSON.stringify({ lastUpdated: 1, totalCount: 0, chunkCount: 0, chunkSize: 500 }));
-    for (let i = 0; i < 605; i++) seed(`photo-${String(i).padStart(3, '0')}.png`, '', metadata);
+    for (let i = 0; i < 605; i++) seed(`photo-${String(i).padStart(3, '0')}.png`, '', {
+        ...metadata, TimeStamp: i + 1,
+    });
     for (let i = 0; i < 121; i++) await db.putIndexOperation(`op-${String(i).padStart(3, '0')}`, {
         type: 'batch_add', timestamp: i, data: { files: Array.from({ length: 5 }, (_, n) => ({
-            fileId: `photo-${String(i * 5 + n).padStart(3, '0')}.png`, metadata,
+            fileId: `photo-${String(i * 5 + n).padStart(3, '0')}.png`,
+            metadata: { ...metadata, TimeStamp: i * 5 + n + 1 },
         })) },
     });
     const get = async query => {
@@ -135,13 +189,16 @@ it('database fallback honors search, pagination, and count-only during a large r
         assert.equal(response.status, 200, await response.clone().text());
         return response.json();
     };
+    const first = await get('count=1&search=photo');
+    assert.equal(first.isIndexedResponse, false);
+    assert.deepEqual(first.files.map(file => file.name), ['photo-604.png']);
     const noMatch = await get('count=1&search=does-not-exist');
-    assert.equal(noMatch.isIndexedResponse, false);
     assert.equal(noMatch.totalCount, 0);
     assert.deepEqual(noMatch.files, []);
     const page = await get('count=1&start=2');
     assert.equal(page.files.length, 1);
     assert.equal(page.returnedCount, 1);
+    assert.equal(page.files[0].name, 'photo-602.png');
     const total = await get('count=-1&sum=true&search=does-not-exist');
     assert.equal(total.sum, 0);
 });

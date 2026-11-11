@@ -411,20 +411,10 @@ export async function mergeOperationsToIndex(context, options = {}) {
             }
         }
 
-        // A deleted/replaced file can have an older operation still queued
-        // (for example if cleanup failed). Reconcile every affected ID with
-        // current KV records so replay and equal-timestamp ordering cannot
-        // resurrect a stale embedded metadata snapshot.
-        if (processedOperationIds.length) {
-            const affected = [...affectedOperationIds(operations.filter(op => processedOperationIds.includes(op.id)))];
-            const affectedSet = new Set(affected);
-            workingIndex.files = workingIndex.files.filter(file => !affectedSet.has(file.id));
-            for (let i = 0; i < affected.length; i += 100) {
-                workingIndex.files.push(...await db.getIndexFiles(affected.slice(i, i + 100)));
-            }
-            workingIndex.files.sort((a, b) => (b.metadata?.TimeStamp || 0) - (a.metadata?.TimeStamp || 0)
-                || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-        }
+        // KV reads are eventually consistent. A getWithMetadata() here can
+        // return the pre-mutation value even though the queued add/remove is
+        // already visible. Applying the event and then acknowledging it is
+        // safer than replacing it with a potentially stale record snapshot.
 
         // 如果有任何修改，保存索引
         if (operationsProcessed > 0) {
@@ -572,7 +562,12 @@ export async function readIndex(context, options = {}) {
         // Run the exact same filtering/pagination logic without merging again.
         let index;
         if (sourceFiles !== null) {
-            index = { success: true, files: sourceFiles, lastUpdated: Date.now() };
+            index = {
+                success: true,
+                files: [...sourceFiles].sort((a, b) => (b.metadata?.TimeStamp || 0) - (a.metadata?.TimeStamp || 0)
+                    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+                lastUpdated: Date.now(),
+            };
         } else {
             // 处理挂起的操作
             let mergeResult = await mergeOperationsToIndex(context);
