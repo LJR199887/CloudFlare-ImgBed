@@ -183,6 +183,13 @@
 
 # 4. Tips
 
+### 上传 API 认证兼容
+
+- 推荐通过请求头 `Authorization: Bearer <API Token>` 上传，Token 必须未过期且具有 `upload` 权限。
+- 仅支持追加 `authCode` 的旧客户端，可以把 API Token 填入其“密钥 / 认证码”字段；上传接口支持 `POST /upload?authCode=<API Token>&returnFormat=full`，无需清除用户端上传密码。
+- `authCode` 仍兼容原来的上传密码；Token 兼容只限上传认证，不适用于管理接口，也不从 Referer 或 Cookie 读取 Token。显式提供 `Authorization` 时优先使用该请求头进行 Token 校验。
+- URL 中的密钥可能进入代理访问日志，请避免记录或分享完整请求 URL；能配置请求头的客户端仍应使用 Bearer Token。
+
 - **前端开源**：参见[MarSeventh/Sanyue-ImgHub](https://github.com/MarSeventh/Sanyue-ImgHub)项目。
 
 - **桌面端开源**：参见[MarSeventh/satellite](https://github.com/MarSeventh/satellite)项目。

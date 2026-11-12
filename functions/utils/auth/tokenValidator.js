@@ -25,6 +25,11 @@ export async function validateApiToken(request, db, requiredPermission) {
         token = authHeader;
     }
 
+    return validateApiTokenValue(token, db, requiredPermission);
+}
+
+// Shared validation for Authorization and the legacy upload authCode transport.
+export async function validateApiTokenValue(token, db, requiredPermission) {
     if (!token) {
         return { valid: false, error: '无效的Token格式' };
     }
@@ -42,7 +47,7 @@ export async function validateApiToken(request, db, requiredPermission) {
     }
 
     // 检查权限，如果不需要特定权限（requiredPermission为null），则只要token有效就通过
-    if (requiredPermission !== null && !tokenData.permissions.includes(requiredPermission)) {
+    if (requiredPermission !== null && (!Array.isArray(tokenData.permissions) || !tokenData.permissions.includes(requiredPermission))) {
         return { valid: false, error: `缺少${requiredPermission}权限` };
     }
 
