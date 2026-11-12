@@ -4,7 +4,7 @@
  */
 
 import { fetchSecurityConfig } from '../sysConfig.js';
-import { validateApiToken } from './tokenValidator.js';
+import { validateApiToken, validateApiTokenValue } from './tokenValidator.js';
 import { getDatabase } from '../databaseAdapter.js';
 import { verifyPassword } from './passwordHash.js';
 import { validateSession } from './sessionManager.js';
@@ -118,6 +118,18 @@ export async function authenticate({
     const tokenResult = await validateApiToken(request, db, requiredPermission);
     if (tokenResult.valid) {
         return AUTHORIZED('admin');
+    }
+
+    // Legacy upload clients send their credential as ?authCode= instead of
+    // Authorization. Accept a validated upload token only in this narrow scope.
+    // Never promote Referer/Cookie credentials to API tokens or enable this for
+    // management APIs. An explicit Authorization header takes precedence.
+    if (authScope === AUTH_SCOPE.USER && requiredPermission === 'upload' &&
+        !request.headers.has('Authorization')) {
+        const uploadToken = url?.searchParams.get('authCode');
+        if (uploadToken && (await validateApiTokenValue(uploadToken, db, 'upload')).valid) {
+            return AUTHORIZED('user');
+        }
     }
 
     // --- 会话/凭据验证 ---
